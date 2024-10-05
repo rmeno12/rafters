@@ -1,0 +1,39 @@
+syntax = "proto3";
+package rafters;
+
+service Frontend {
+    rpc getState (Empty) returns (State);
+    rpc startRaft (IntegerArg) returns (Empty);
+    rpc addServer (IntegerArg) returns (Empty);
+    rpc removeServer (IntegerArg) returns (Empty);
+    rpc get (IntegerArg) returns (KeyValue);
+    rpc put (KeyValue) returns (Empty);
+    rpc replace (KeyValue) returns (Empty);
+}
+
+service Raft {
+    rpc getState (Empty) returns (State);
+    rpc get (IntegerArg) returns (KeyValue);
+    rpc put (KeyValue) returns (Empty);
+
+    rpc addServer (IntegerArg) returns (Empty);
+    rpc removeServer (IntegerArg) returns (Empty);
+}
+
+message Empty {}
+
+message State {
+    int32 term = 1;
+    bool isLeader = 2;
+}
+
+message KeyValue {
+    int32 key =  1;
+    string value = 2;
+}
+
+message IntegerArg {
+    int32 arg = 1;
+}
+
+
