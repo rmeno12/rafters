@@ -28,6 +28,18 @@ enum RaftNodeKind {
     Candidate,
 }
 
+enum LogCommand {
+    Put,
+    Remove,
+}
+
+struct LogEntry {
+    term: i32,
+    key: i32,
+    value: String,
+    command: LogCommand,
+}
+
 struct RaftNodeState {
     id: i32,
     servers: HashMap<i32, RaftClient<Channel>>,
@@ -35,8 +47,9 @@ struct RaftNodeState {
     kind: RaftNodeKind,
     term: i32,
     voted_for: i32,
-    log: Vec<i32>, // TODO: change this to some other type
+    log: Vec<LogEntry>,
     last_log_term: i32,
+    kv: HashMap<i32, String>,
 }
 
 impl RaftNodeState {
@@ -53,6 +66,7 @@ impl RaftNodeState {
             voted_for: 0,
             log: vec![],
             last_log_term: 0,
+            kv: HashMap::new(),
         }
     }
 }
@@ -74,11 +88,48 @@ impl Raft for RaftersServer {
     }
 
     async fn get(&self, request: Request<IntegerArg>) -> Result<Response<KeyValue>, Status> {
-        todo!()
+        // only do following as leader
+        // read from kv and send data back
+        let state = self.node_state.lock().await;
+        if state.kind == RaftNodeKind::Leader {
+            let req = request.into_inner();
+            let key = req.arg;
+            match state.kv.get(&key) {
+                Some(val) => Ok(Response::new(KeyValue {
+                    key,
+                    value: val.clone(),
+                })),
+                None => Err(Status::invalid_argument(format!(
+                    "Key {} not in store!",
+                    key
+                ))),
+            }
+        } else {
+            todo!()
+        }
     }
 
     async fn put(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
-        todo!()
+        // only do following as leader
+        // add add command to log
+        // send append entry rpcs to other servers in parallel
+        // keep sending until they accept (some error handling described in paper)
+        // once they all accept, add new thing to kv
+        // send response to client
+        let mut state = self.node_state.lock().await;
+        if state.kind == RaftNodeKind::Leader {
+            let req = request.into_inner();
+            let new_entry = LogEntry {
+                term: state.term,
+                key: req.key,
+                value: req.value,
+                command: LogCommand::Put,
+            };
+            state.log.push(new_entry);
+            Ok(Response::new(Empty{}))
+        } else {
+            todo!()
+        }
     }
 
     async fn add_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
@@ -133,6 +184,7 @@ impl Raft for RaftersServer {
                 if !req.entries.is_empty() {
                     todo!()
                 } else {
+                    // TODO: handle bad requests?
                     state.election_timeout_end = Instant::now() + Duration::from_secs(1);
                     Ok(Response::new(AppendEntriesResponse {
                         term: state.term,
