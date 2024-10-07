@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{
+    transport::{Channel, Endpoint, Server},
+    Request, Response, Status,
+};
 
 pub mod rafters {
     tonic::include_proto!("rafters");
 }
 
 use rafters::frontend_server::{Frontend, FrontendServer};
+use rafters::raft_client::RaftClient;
 use rafters::{Empty, IntegerArg, KeyValue, State};
+
+type ChildMap = HashMap<i32, (std::process::Child, RaftClient<Channel>)>;
 
 pub struct RaftersFrontend {
     term: i32,
-    servers: Arc<Mutex<HashMap<i32, std::process::Child>>>,
+    servers: Arc<Mutex<ChildMap>>,
 }
 
 impl Default for RaftersFrontend {
@@ -34,19 +40,39 @@ impl Frontend for RaftersFrontend {
     }
 
     async fn start_raft(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
+        let child_binary = if cfg!(debug_assertions) {
+            "target/debug/raftserver"
+        } else {
+            "target/release/raftserver"
+        };
         let num_servers = request.into_inner().arg;
         let mut servers = self.servers.lock().await;
-        for i in 1..=num_servers {
-            let child = std::process::Command::new(if cfg!(debug_assertions) {
-                "target/debug/raftserver"
-            } else {
-                "target/release/raftserver"
+        let children: Vec<std::process::Child> = (1..=num_servers)
+            .map(|i| {
+                let child = std::process::Command::new(child_binary)
+                    .arg(i.to_string())
+                    .spawn()
+                    .unwrap_or_else(|_| panic!("Couldn't start raft node {}", i));
+                println!("Started child raft node {} (pid {})", i, child.id());
+                child
             })
-            .arg(i.to_string())
-            .spawn()
-            .unwrap_or_else(|_| panic!("couldn't start raft node {}", i));
-            println!("Started child raft node {} (pid {})", i, child.id());
-            servers.insert(i, child);
+            .collect();
+        // wait for raft nodees to come online before sending them messages
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        for (i, child) in (1..=num_servers).zip(children) {
+            let endpoint = Endpoint::from_shared(format!("http://[::1]:{}", 9000 + i)).unwrap();
+            println!("Connecting to node {} on {:?}", i, endpoint.uri());
+            let client = RaftClient::connect(endpoint)
+                .await
+                .unwrap_or_else(|_| panic!("Couldn't connect to raft node {}", i));
+            servers.insert(i, (child, client));
+        }
+        for (num, (_, client)) in servers.iter_mut() {
+            for i in 1..=num_servers {
+                if i != *num {
+                    client.add_server(IntegerArg { arg: i }).await?;
+                }
+            }
         }
         Ok(Response::new(Empty {}))
     }
@@ -60,14 +86,17 @@ impl Frontend for RaftersFrontend {
     }
 
     async fn get(&self, request: Request<IntegerArg>) -> Result<Response<KeyValue>, Status> {
+        // ask leader for info
         todo!()
     }
 
     async fn put(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
+        // tell leader
         todo!()
     }
 
     async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
+        // tell leader
         todo!()
     }
 }

@@ -18,6 +18,7 @@ service Raft {
 
     rpc addServer (IntegerArg) returns (Empty);
     rpc removeServer (IntegerArg) returns (Empty);
+    rpc requestVote (VoteRequest) returns (VoteResponse);
 }
 
 message Empty {}
@@ -36,4 +37,15 @@ message IntegerArg {
     int32 arg = 1;
 }
 
+message VoteRequest {
+    int32 term = 1;
+    int32 candidateId = 2;
+    int32 lastLogIndex = 3;
+    int32 lastLogTerm = 4;
+}
+
+message VoteResponse {
+    int32 term = 1;
+    bool voteGranted = 2;
+}
 
