@@ -16,7 +16,10 @@ pub mod rafters {
 
 use rafters::raft_client::RaftClient;
 use rafters::raft_server::{Raft, RaftServer};
-use rafters::{Empty, IntegerArg, KeyValue, State, VoteRequest, VoteResponse};
+use rafters::{
+    AppendEntriesRequest, AppendEntriesResponse, Empty, IntegerArg, KeyValue, State, VoteRequest,
+    VoteResponse,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RaftNodeKind {
@@ -104,7 +107,6 @@ impl Raft for RaftersServer {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
         println!("{}: Got vote request from {}", state.id, req.candidate_id);
-        state.election_timeout_end = Instant::now() + Duration::from_secs(100);
         // Vote if request is not for an older term, and the candidate's log is at least as recent
         // as this node's
         let grant_vote = req.term >= state.term
@@ -112,15 +114,70 @@ impl Raft for RaftersServer {
             && req.last_log_term >= state.last_log_term;
         if grant_vote {
             state.voted_for = req.candidate_id;
+            state.election_timeout_end = Instant::now() + Duration::from_secs(100);
         }
         Ok(Response::new(VoteResponse {
             term: state.term,
             vote_granted: grant_vote,
         }))
     }
+
+    async fn append_entries(
+        &self,
+        request: Request<AppendEntriesRequest>,
+    ) -> Result<Response<AppendEntriesResponse>, Status> {
+        let mut state = self.node_state.lock().await;
+        let req = request.into_inner();
+        match state.kind {
+            RaftNodeKind::Follower => {
+                if !req.entries.is_empty() {
+                    todo!()
+                } else {
+                    state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+                    Ok(Response::new(AppendEntriesResponse {
+                        term: state.term,
+                        success: true,
+                    }))
+                }
+            }
+            RaftNodeKind::Candidate => {
+                todo!()
+            }
+            RaftNodeKind::Leader => {
+                todo!()
+            }
+        }
+    }
 }
 
-async fn periodic_logic(node_state: Arc<Mutex<RaftNodeState>>) {
+async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut state = node_state.lock().await;
+        let term = state.term;
+        let id = state.id;
+        let kind = state.kind;
+        if kind != RaftNodeKind::Leader {
+            drop(state);
+            continue;
+        }
+        for client in state.servers.values_mut() {
+            let resp = client
+                .append_entries(AppendEntriesRequest {
+                    term,
+                    leader_id: id,
+                    prev_log_index: 0,
+                    prev_log_term: 0,
+                    entries: vec![],
+                    leader_commit_index: 0,
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
+async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
     loop {
         let election_timeout_end = node_state.lock().await.election_timeout_end;
         tokio::time::sleep_until(election_timeout_end).await;
@@ -128,8 +185,12 @@ async fn periodic_logic(node_state: Arc<Mutex<RaftNodeState>>) {
         let mut state = node_state.lock().await;
         let election_timeout_end = state.election_timeout_end;
         let kind = state.kind;
-        if election_timeout_end > Instant::now() || kind != RaftNodeKind::Follower {
+        if election_timeout_end > Instant::now() {
             drop(state); // is this necessary?
+            continue;
+        } else if kind == RaftNodeKind::Leader {
+            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            drop(state);
             continue;
         }
 
@@ -159,6 +220,19 @@ async fn periodic_logic(node_state: Arc<Mutex<RaftNodeState>>) {
         if votes > state.servers.len() / 2 {
             println!("{}: Won the election. Becoming leader.", state.id);
             state.kind = RaftNodeKind::Leader;
+            for client in state.servers.values_mut() {
+                let resp = client
+                    .append_entries(AppendEntriesRequest {
+                        term: new_term,
+                        leader_id: id,
+                        prev_log_index: 0,
+                        prev_log_term: 0,
+                        entries: vec![],
+                        leader_commit_index: 0,
+                    })
+                    .await
+                    .unwrap();
+            }
         }
     }
 }
@@ -174,7 +248,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(node_num)));
     let raftserver = RaftersServer::new(raft_node_state.clone());
 
-    tokio::spawn(periodic_logic(raft_node_state.clone()));
+    tokio::spawn(leader_loop(raft_node_state.clone()));
+    tokio::spawn(follower_candidate_loop(raft_node_state.clone()));
 
     Server::builder()
         .add_service(RaftServer::new(raftserver))

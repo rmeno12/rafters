@@ -19,6 +19,7 @@ service Raft {
     rpc addServer (IntegerArg) returns (Empty);
     rpc removeServer (IntegerArg) returns (Empty);
     rpc requestVote (VoteRequest) returns (VoteResponse);
+    rpc appendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
 }
 
 message Empty {}
@@ -47,5 +48,19 @@ message VoteRequest {
 message VoteResponse {
     int32 term = 1;
     bool voteGranted = 2;
+}
+
+message AppendEntriesRequest {
+    int32 term = 1;
+    int32 leaderId = 2;
+    int32 prevLogIndex = 3;
+    int32 prevLogTerm = 4;
+    repeated KeyValue entries = 5;
+    int32 leaderCommitIndex = 6;
+}
+
+message AppendEntriesResponse {
+    int32 term = 1;
+    bool success = 2;
 }
 
