@@ -45,15 +45,15 @@ type NodeId = i32;
 
 struct RaftNodeState {
     id: NodeId,
-    servers: HashMap<NodeId, RaftClient<Channel>>,
-    election_timeout_end: Instant,
     kind: RaftNodeKind,
     term: i32,
+    current_leader: NodeId,
+    election_timeout_end: Instant,
     voted_for: NodeId,
     votes_received: Vec<NodeId>,
-    current_leader: NodeId,
     log: Vec<LogEntry>,
     kv: HashMap<i32, String>,
+    other_nodes: HashMap<NodeId, RaftClient<Channel>>,
 }
 
 impl RaftNodeState {
@@ -63,7 +63,7 @@ impl RaftNodeState {
         let election_timeout = election_timeout_dist.sample(&mut rng);
         Self {
             id,
-            servers: HashMap::new(),
+            other_nodes: HashMap::new(),
             election_timeout_end: Instant::now() + Duration::from_secs_f64(election_timeout),
             kind: RaftNodeKind::Follower,
             term: 1,
@@ -145,14 +145,14 @@ impl Raft for RaftersServer {
             error!("Couldn't connect to new node {}", server_num);
             panic!()
         });
-        let servers = &mut self.node_state.lock().await.servers;
+        let servers = &mut self.node_state.lock().await.other_nodes;
         servers.insert(server_num, client);
         Ok(Response::new(Empty {}))
     }
 
     async fn remove_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
         let server_num = request.into_inner().arg;
-        let servers = &mut self.node_state.lock().await.servers;
+        let servers = &mut self.node_state.lock().await.other_nodes;
         servers.remove(&server_num);
         Ok(Response::new(Empty {}))
     }
@@ -242,7 +242,7 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
             leader_commit_index: 0,
         };
         let _vec_resps: Vec<_> = state
-            .servers
+            .other_nodes
             .clone()
             .into_iter()
             .map(|(client_id, client)| {
@@ -294,9 +294,9 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
             last_log_term,
         };
         let id = state.id;
-        let majority = (state.servers.len() + 2) / 2;
+        let majority = (state.other_nodes.len() + 2) / 2;
         let _vote_req_tasks: Vec<_> = state
-            .servers
+            .other_nodes
             .clone()
             .into_iter()
             .map(|(client_id, client)| {
