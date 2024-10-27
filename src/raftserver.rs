@@ -53,7 +53,6 @@ struct RaftNodeState {
     votes_received: Vec<NodeId>,
     current_leader: NodeId,
     log: Vec<LogEntry>,
-    last_log_term: i32,
     kv: HashMap<i32, String>,
 }
 
@@ -72,7 +71,6 @@ impl RaftNodeState {
             votes_received: vec![],
             current_leader: 0,
             log: vec![],
-            last_log_term: 0,
             kv: HashMap::new(),
         }
     }
@@ -173,15 +171,15 @@ impl Raft for RaftersServer {
             state.kind = RaftNodeKind::Follower;
             state.voted_for = 0;
         }
-        state.last_log_term = if !state.log.is_empty() {
+        let last_log_term = if !state.log.is_empty() {
             state.log.last().unwrap().term
         } else {
             0
         };
         // Either have a more recent log, or have log from the same term but candidate has at least
         // as many values in their log
-        let log_ok = req.last_log_term > state.last_log_term
-            || (req.last_log_term == state.last_log_term
+        let log_ok = req.last_log_term > last_log_term
+            || (req.last_log_term == last_log_term
                 && req.last_log_index >= state.log.len() as i32);
         // If we're in the same term, and their log is okay, and we haven't already voted for
         // someone else
@@ -284,7 +282,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         state.kind = RaftNodeKind::Candidate;
         state.voted_for = state.id;
         state.votes_received = vec![state.id];
-        state.last_log_term = if !state.log.is_empty() {
+        let last_log_term = if !state.log.is_empty() {
             state.log.last().unwrap().term
         } else {
             0
@@ -293,7 +291,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
             term: state.term,
             candidate_id: state.id,
             last_log_index: state.log.len() as i32,
-            last_log_term: state.last_log_term,
+            last_log_term,
         };
         let id = state.id;
         let majority = (state.servers.len() + 2) / 2;
