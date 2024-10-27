@@ -41,13 +41,17 @@ struct LogEntry {
     command: LogCommand,
 }
 
+type NodeId = i32;
+
 struct RaftNodeState {
-    id: i32,
-    servers: HashMap<i32, RaftClient<Channel>>,
+    id: NodeId,
+    servers: HashMap<NodeId, RaftClient<Channel>>,
     election_timeout_end: Instant,
     kind: RaftNodeKind,
     term: i32,
-    voted_for: i32,
+    voted_for: NodeId,
+    votes_received: Vec<NodeId>,
+    current_leader: NodeId,
     log: Vec<LogEntry>,
     last_log_term: i32,
     kv: HashMap<i32, String>,
@@ -65,6 +69,8 @@ impl RaftNodeState {
             kind: RaftNodeKind::Follower,
             term: 1,
             voted_for: 0,
+            votes_received: vec![],
+            current_leader: 0,
             log: vec![],
             last_log_term: 0,
             kv: HashMap::new(),
@@ -160,14 +166,31 @@ impl Raft for RaftersServer {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
         info!("{}: Got vote request from {}", state.id, req.candidate_id);
-        // Vote if request is not for an older term, and the candidate's log is at least as recent
-        // as this node's
-        let grant_vote = req.term >= state.term
-            && req.last_log_index >= state.log.len() as i32
-            && req.last_log_term >= state.last_log_term;
+
+        // If we're behind, become a follower
+        if req.term > state.term {
+            state.term = req.term;
+            state.kind = RaftNodeKind::Follower;
+            state.voted_for = 0;
+        }
+        state.last_log_term = if !state.log.is_empty() {
+            state.log.last().unwrap().term
+        } else {
+            0
+        };
+        // Either have a more recent log, or have log from the same term but candidate has at least
+        // as many values in their log
+        let log_ok = req.last_log_term > state.last_log_term
+            || (req.last_log_term == state.last_log_term
+                && req.last_log_index >= state.log.len() as i32);
+        // If we're in the same term, and their log is okay, and we haven't already voted for
+        // someone else
+        let grant_vote = req.term == state.term
+            && log_ok
+            && (state.voted_for == req.candidate_id || state.voted_for == 0);
         if grant_vote {
             state.voted_for = req.candidate_id;
-            state.election_timeout_end = Instant::now() + Duration::from_secs(100);
+            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
         }
         Ok(Response::new(VoteResponse {
             term: state.term,
@@ -207,27 +230,35 @@ impl Raft for RaftersServer {
 async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let mut state = node_state.lock().await;
-        let term = state.term;
-        let id = state.id;
-        let kind = state.kind;
-        if kind != RaftNodeKind::Leader {
-            drop(state);
+        let state = node_state.lock().await;
+        if state.kind != RaftNodeKind::Leader {
             continue;
         }
-        for client in state.servers.values_mut() {
-            let resp = client
-                .append_entries(AppendEntriesRequest {
-                    term,
-                    leader_id: id,
-                    prev_log_index: 0,
-                    prev_log_term: 0,
-                    entries: vec![],
-                    leader_commit_index: 0,
-                })
-                .await
-                .unwrap();
-        }
+        let id = state.id;
+        let req = AppendEntriesRequest {
+            term: state.term,
+            leader_id: id,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![],
+            leader_commit_index: 0,
+        };
+        let _vec_resps: Vec<_> = state
+            .servers
+            .clone()
+            .into_iter()
+            .map(|(client_id, client)| {
+                let mut client = client.clone();
+                let req_val = req.clone();
+                tokio::spawn(async move {
+                    let req_result = client.append_entries(req_val);
+                    if (tokio::time::timeout(Duration::from_millis(100), req_result).await).is_err()
+                    {
+                        warn!("{}: Unable to send heartbeat to {}", id, client_id);
+                    }
+                });
+            })
+            .collect();
     }
 }
 
@@ -240,54 +271,76 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         let election_timeout_end = state.election_timeout_end;
         let kind = state.kind;
         if election_timeout_end > Instant::now() {
-            drop(state); // is this necessary?
             continue;
         } else if kind == RaftNodeKind::Leader {
             state.election_timeout_end = Instant::now() + Duration::from_secs(1);
-            drop(state);
             continue;
         }
 
         // Election timed out and we are a follower, so time to start a new
         // election and request votes from all other raft nodes
-        info!("{}: Timed out, starting election", state.id);
+        info!("{}: Election timer ran out, starting election", state.id);
         state.term += 1;
-        let new_term = state.term;
-        let id = state.id;
         state.kind = RaftNodeKind::Candidate;
-        let mut votes = 1;
-        for client in state.servers.values_mut() {
-            // TODO: do this in parallel with tokio::spawn
-            let resp = client
-                .request_vote(VoteRequest {
-                    term: new_term,
-                    candidate_id: id,
-                    last_log_index: 0,
-                    last_log_term: 0,
+        state.voted_for = state.id;
+        state.votes_received = vec![state.id];
+        state.last_log_term = if !state.log.is_empty() {
+            state.log.last().unwrap().term
+        } else {
+            0
+        };
+        let vote_req = VoteRequest {
+            term: state.term,
+            candidate_id: state.id,
+            last_log_index: state.log.len() as i32,
+            last_log_term: state.last_log_term,
+        };
+        let id = state.id;
+        let majority = (state.servers.len() + 2) / 2;
+        let _vote_req_tasks: Vec<_> = state
+            .servers
+            .clone()
+            .into_iter()
+            .map(|(client_id, client)| {
+                let mut client = client.clone();
+                let this_state = node_state.clone();
+                tokio::spawn(async move {
+                    let req_result = client.request_vote(vote_req);
+                    match tokio::time::timeout(Duration::from_millis(500), req_result).await {
+                        Ok(Ok(resp)) => {
+                            let resp = resp.into_inner();
+                            let mut state = this_state.lock().await;
+                            if state.kind == RaftNodeKind::Candidate
+                                && resp.term == state.term
+                                && resp.vote_granted
+                            {
+                                state.votes_received.push(client_id);
+                                if state.votes_received.len() >= majority {
+                                    // won the election
+                                    state.kind = RaftNodeKind::Leader;
+                                    state.current_leader = state.id;
+                                    state.election_timeout_end += Duration::from_secs(1);
+                                    info!("{}: Won the election! Becoming leader", state.id);
+
+                                    // TODO: Replicate logs onto followers
+                                }
+                            } else if resp.term > state.term {
+                                // our term is behind, step out of the election and wait for
+                                // someone to start the next one
+                                state.term = resp.term;
+                                state.kind = RaftNodeKind::Follower;
+                                state.voted_for = 0;
+                                state.election_timeout_end += Duration::from_secs(1);
+                            }
+                        }
+                        _ => {
+                            warn!("{} Couldn't send VoteRequest to {}", id, client_id)
+                        }
+                    }
                 })
-                .await
-                .unwrap();
-            if resp.into_inner().vote_granted {
-                votes += 1;
-            }
-        }
-        if votes > state.servers.len() / 2 {
-            info!("{}: Won the election. Becoming leader.", state.id);
-            state.kind = RaftNodeKind::Leader;
-            for client in state.servers.values_mut() {
-                let resp = client
-                    .append_entries(AppendEntriesRequest {
-                        term: new_term,
-                        leader_id: id,
-                        prev_log_index: 0,
-                        prev_log_term: 0,
-                        entries: vec![],
-                        leader_commit_index: 0,
-                    })
-                    .await
-                    .unwrap();
-            }
-        }
+            })
+            .collect();
+        state.election_timeout_end = Instant::now() + Duration::from_secs(1);
     }
 }
 
