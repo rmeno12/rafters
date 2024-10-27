@@ -1,0 +1,4 @@
+#!/bin/bash
+# need to explicitly build so that raftserver is also built
+cargo build
+cargo run --bin frontend
