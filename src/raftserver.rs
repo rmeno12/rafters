@@ -1,4 +1,4 @@
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use rand::prelude::Distribution;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,8 +52,11 @@ struct RaftNodeState {
     voted_for: NodeId,
     votes_received: Vec<NodeId>,
     log: Vec<LogEntry>,
+    committed_index: usize,
     kv: HashMap<i32, String>,
     other_nodes: HashMap<NodeId, RaftClient<Channel>>,
+    sent_len: HashMap<NodeId, usize>,
+    acked_len: HashMap<NodeId, usize>,
 }
 
 impl RaftNodeState {
@@ -63,15 +66,18 @@ impl RaftNodeState {
         let election_timeout = election_timeout_dist.sample(&mut rng);
         Self {
             id,
-            other_nodes: HashMap::new(),
-            election_timeout_end: Instant::now() + Duration::from_secs_f64(election_timeout),
             kind: RaftNodeKind::Follower,
             term: 1,
+            current_leader: 0,
+            election_timeout_end: Instant::now() + Duration::from_secs_f64(election_timeout),
             voted_for: 0,
             votes_received: vec![],
-            current_leader: 0,
             log: vec![],
+            committed_index: 0,
             kv: HashMap::new(),
+            other_nodes: HashMap::new(),
+            sent_len: HashMap::new(),
+            acked_len: HashMap::new(),
         }
     }
 }
@@ -179,8 +185,7 @@ impl Raft for RaftersServer {
         // Either have a more recent log, or have log from the same term but candidate has at least
         // as many values in their log
         let log_ok = req.last_log_term > last_log_term
-            || (req.last_log_term == last_log_term
-                && req.last_log_index >= state.log.len() as i32);
+            || (req.last_log_term == last_log_term && req.last_log_index >= state.log.len() as i32);
         // If we're in the same term, and their log is okay, and we haven't already voted for
         // someone else
         let grant_vote = req.term == state.term
@@ -209,6 +214,7 @@ impl Raft for RaftersServer {
                 } else {
                     // TODO: handle bad requests?
                     state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+                    trace!("{}: Got heartbeat from {}", state.id, req.leader_id);
                     Ok(Response::new(AppendEntriesResponse {
                         term: state.term,
                         success: true,
@@ -258,6 +264,84 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
             })
             .collect();
     }
+}
+
+async fn replicate_log_to(
+    node_state: Arc<Mutex<RaftNodeState>>,
+    client_id: NodeId,
+    client: RaftClient<Channel>,
+) -> tokio::task::JoinHandle<()> {
+    let mut client = client.clone();
+    let this_state = node_state.clone();
+    tokio::spawn(async move {
+        loop {
+            let mut state = this_state.lock().await;
+            let prefix_len = state.sent_len.get(&client_id).copied().unwrap_or_default();
+            let prefix_term = if prefix_len > 0 {
+                state.log.get(prefix_len - 1).unwrap().term
+            } else {
+                0
+            };
+            let suffix: Vec<_> = state
+                .log
+                .get(prefix_len..)
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| KeyValue {
+                    key: entry.key,
+                    value: entry.value.clone(),
+                })
+                .collect();
+            let to_ack_len = prefix_len + suffix.len();
+            let req = AppendEntriesRequest {
+                term: state.term,
+                leader_id: state.id,
+                prev_log_index: prefix_len as i32,
+                prev_log_term: prefix_term,
+                entries: suffix,
+                leader_commit_index: state.committed_index as i32,
+            };
+            let id = state.id;
+            let req_result = client.append_entries(req);
+            let done = match tokio::time::timeout(Duration::from_millis(250), req_result).await {
+                Ok(Ok(resp)) => {
+                    let resp = resp.into_inner();
+                    let mut done = true;
+                    if resp.term == state.term && state.kind == RaftNodeKind::Leader {
+                        if resp.success {
+                            state.sent_len.insert(client_id, to_ack_len);
+                            state.acked_len.insert(client_id, to_ack_len);
+                        } else if state.sent_len.get(&client_id).copied().unwrap_or_default() > 0 {
+                            let l = state.sent_len.get(&client_id).copied().unwrap_or_default();
+                            state.sent_len.insert(client_id, l - 1);
+                            done = false;
+                        }
+                    }
+                    done
+                }
+                _ => {
+                    warn!("{}: Unable to replicate log to {}", id, client_id);
+                    true
+                }
+            };
+            if done {
+                break;
+            }
+        }
+    })
+}
+
+async fn replicate_log(state: &RaftNodeState, node_state: Arc<Mutex<RaftNodeState>>) {
+    let tasks: Vec<_> = state
+        .other_nodes
+        .clone()
+        .into_iter()
+        .map(|(client_id, client)| {
+            trace!("{}: Replicating log to {}", state.id, client_id);
+            replicate_log_to(node_state.clone(), client_id, client)
+        })
+        .collect();
+    futures::future::join_all(tasks).await;
 }
 
 async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
@@ -320,7 +404,12 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                                     state.election_timeout_end += Duration::from_secs(1);
                                     info!("{}: Won the election! Becoming leader", state.id);
 
-                                    // TODO: Replicate logs onto followers
+                                    let log_len = state.log.len();
+                                    for client_id in state.other_nodes.clone().keys() {
+                                        state.sent_len.insert(*client_id, log_len);
+                                        state.acked_len.insert(*client_id, 0);
+                                    }
+                                    replicate_log(&state, this_state.clone()).await;
                                 }
                             } else if resp.term > state.term {
                                 // our term is behind, step out of the election and wait for
