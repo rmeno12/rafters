@@ -1,3 +1,4 @@
+use log::{error, info, warn};
 use rand::prelude::Distribution;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -126,7 +127,7 @@ impl Raft for RaftersServer {
                 command: LogCommand::Put,
             };
             state.log.push(new_entry);
-            Ok(Response::new(Empty{}))
+            Ok(Response::new(Empty {}))
         } else {
             todo!()
         }
@@ -136,9 +137,10 @@ impl Raft for RaftersServer {
         let server_num = request.into_inner().arg;
         let endpoint =
             Endpoint::from_shared(format!("http://[::1]:{}", 9000 + server_num)).unwrap();
-        let client = RaftClient::connect(endpoint)
-            .await
-            .unwrap_or_else(|_| panic!("Couldn't connect to new node {}", server_num));
+        let client = RaftClient::connect(endpoint).await.unwrap_or_else(|_| {
+            error!("Couldn't connect to new node {}", server_num);
+            panic!()
+        });
         let servers = &mut self.node_state.lock().await.servers;
         servers.insert(server_num, client);
         Ok(Response::new(Empty {}))
@@ -157,7 +159,7 @@ impl Raft for RaftersServer {
     ) -> Result<Response<VoteResponse>, Status> {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
-        println!("{}: Got vote request from {}", state.id, req.candidate_id);
+        info!("{}: Got vote request from {}", state.id, req.candidate_id);
         // Vote if request is not for an older term, and the candidate's log is at least as recent
         // as this node's
         let grant_vote = req.term >= state.term
@@ -248,7 +250,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
 
         // Election timed out and we are a follower, so time to start a new
         // election and request votes from all other raft nodes
-        println!("{}: Timed out, starting election", state.id);
+        info!("{}: Timed out, starting election", state.id);
         state.term += 1;
         let new_term = state.term;
         let id = state.id;
@@ -270,7 +272,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
             }
         }
         if votes > state.servers.len() / 2 {
-            println!("{}: Won the election. Becoming leader.", state.id);
+            info!("{}: Won the election. Becoming leader.", state.id);
             state.kind = RaftNodeKind::Leader;
             for client in state.servers.values_mut() {
                 let resp = client
@@ -294,8 +296,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let node_num: i32 = args.get(1).unwrap().parse()?;
 
+    let env = env_logger::Env::default().default_filter_or("info");
+    env_logger::init_from_env(env);
+
     let addr = format!("[::1]:{}", 9000 + node_num).parse().unwrap();
-    println!("Starting raft node {}. Listening on {}", node_num, addr);
+    info!("Starting raft node {}. Listening on {}", node_num, addr);
 
     let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(node_num)));
     let raftserver = RaftersServer::new(raft_node_state.clone());

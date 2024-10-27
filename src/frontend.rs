@@ -1,3 +1,4 @@
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -53,7 +54,7 @@ impl Frontend for RaftersFrontend {
                     .arg(i.to_string())
                     .spawn()
                     .unwrap_or_else(|_| panic!("Couldn't start raft node {}", i));
-                println!("Started child raft node {} (pid {})", i, child.id());
+                info!("Started child raft node {} (pid {})", i, child.id());
                 child
             })
             .collect();
@@ -61,10 +62,11 @@ impl Frontend for RaftersFrontend {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         for (i, child) in (1..=num_servers).zip(children) {
             let endpoint = Endpoint::from_shared(format!("http://[::1]:{}", 9000 + i)).unwrap();
-            println!("Connecting to node {} on {:?}", i, endpoint.uri());
-            let client = RaftClient::connect(endpoint)
-                .await
-                .unwrap_or_else(|_| panic!("Couldn't connect to raft node {}", i));
+            info!("Connecting to node {} on {:?}", i, endpoint.uri());
+            let client = RaftClient::connect(endpoint).await.unwrap_or_else(|_| {
+                error!("Couldn't connect to raft node {}", i);
+                panic!()
+            });
             servers.insert(i, (child, client));
         }
         for (num, (_, client)) in servers.iter_mut() {
@@ -103,10 +105,13 @@ impl Frontend for RaftersFrontend {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let env = env_logger::Env::default().default_filter_or("info");
+    env_logger::init_from_env(env);
+
     let addr = "[::1]:8001".parse().unwrap();
     let frontend = RaftersFrontend::default();
 
-    println!("Starting frontend. Listening on {}", addr);
+    info!("Starting frontend. Listening on {}", addr);
 
     Server::builder()
         .add_service(FrontendServer::new(frontend))
