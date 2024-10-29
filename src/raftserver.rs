@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::{
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{timeout, Duration, Instant},
 };
 use tonic::{
     transport::{Channel, Endpoint, Server},
@@ -59,6 +59,13 @@ struct RaftNodeState {
     other_nodes: HashMap<NodeId, RaftClient<Channel>>,
     sent_len: HashMap<NodeId, usize>,
     acked_len: HashMap<NodeId, usize>,
+}
+
+struct Timeouts;
+impl Timeouts {
+    const HEARTBEAT: Duration = Duration::from_millis(100);
+    const LOG_REPLICATE: Duration = Duration::from_millis(250);
+    const VOTE_RESPONSE: Duration = Duration::from_millis(250);
 }
 
 impl RaftNodeState {
@@ -307,8 +314,7 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                 let req_val = req.clone();
                 tokio::spawn(async move {
                     let req_result = client.append_entries(req_val);
-                    if (tokio::time::timeout(Duration::from_millis(100), req_result).await).is_err()
-                    {
+                    if (timeout(Timeouts::HEARTBEAT, req_result).await).is_err() {
                         warn!("{}: Unable to send heartbeat to {}", id, client_id);
                     }
                 });
@@ -354,7 +360,7 @@ async fn replicate_log_to(
             };
             let id = state.id;
             let req_result = client.append_entries(req);
-            let done = match tokio::time::timeout(Duration::from_millis(250), req_result).await {
+            let done = match timeout(Timeouts::LOG_REPLICATE, req_result).await {
                 Ok(Ok(resp)) => {
                     let resp = resp.into_inner();
                     let mut done = true;
@@ -439,7 +445,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                 let this_state = node_state.clone();
                 tokio::spawn(async move {
                     let req_result = client.request_vote(vote_req);
-                    match tokio::time::timeout(Duration::from_millis(500), req_result).await {
+                    match timeout(Timeouts::VOTE_RESPONSE, req_result).await {
                         Ok(Ok(resp)) => {
                             let resp = resp.into_inner();
                             let mut state = this_state.lock().await;
