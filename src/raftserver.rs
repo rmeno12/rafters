@@ -29,11 +29,13 @@ enum RaftNodeKind {
     Candidate,
 }
 
+#[derive(Clone)]
 enum LogCommand {
     Put,
     Remove,
 }
 
+#[derive(Clone)]
 struct LogEntry {
     term: i32,
     key: i32,
@@ -207,6 +209,34 @@ impl Raft for RaftersServer {
     ) -> Result<Response<AppendEntriesResponse>, Status> {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
+        // if req.term > state.term {
+        //     state.term = req.term;
+        //     state.voted_for = 0;
+        //     state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+        // }
+        // if req.term == state.term {
+        //     state.kind = RaftNodeKind::Follower;
+        //     state.current_leader = req.leader_id;
+        // }
+        // let log_ok = state.log.len() as i32 >= req.prev_log_index
+        //     && (req.prev_log_index == 0
+        //         || state.log.last().cloned().unwrap().term == req.prev_log_term);
+        // if req.term == state.term && log_ok {
+        //     append_entries(&mut state, req.prev_log_index as usize, &req.entries);
+        //     let ack = req.prev_log_index + req.entries.len() as i32;
+        //     let resp = AppendEntriesResponse {
+        //         term: state.term,
+        //         success: true,
+        //     };
+        //     Ok(Response::new(resp))
+        // } else {
+        //     // send negative
+        //     let resp = AppendEntriesResponse {
+        //         term: state.term,
+        //         success: false,
+        //     };
+        //     Ok(Response::new(resp))
+        // }
         match state.kind {
             RaftNodeKind::Follower => {
                 if !req.entries.is_empty() {
@@ -228,6 +258,27 @@ impl Raft for RaftersServer {
                 todo!()
             }
         }
+    }
+}
+
+fn append_entries(state: &mut RaftNodeState, prefix_len: usize, suffix: &[KeyValue]) {
+    if suffix.is_empty() {
+        return;
+    } else {
+        todo!();
+    }
+    // TODO: adjust inter-node communication to send LogEntry's instead of KeyValues
+    if !suffix.is_empty() && state.log.len() > prefix_len {
+        todo!();
+        // let index = std::cmp::min(state.log.len(), prefix_len + suffix.len()) - 1;
+        // if state.log.get(index).to_owned().unwrap().term != suffix.get(index - prefix_len).to_owned().unwrap().term {
+        //     state.log.truncate(prefix_len);
+        // }
+    }
+    if prefix_len + suffix.len() > state.log.len() {
+        state.log.extend(suffix.get((state.log.len()-prefix_len)..).into_iter().map(|thing| {
+            todo!();
+        }));
     }
 }
 
