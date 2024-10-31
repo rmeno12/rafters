@@ -50,17 +50,31 @@ message VoteResponse {
     bool voteGranted = 2;
 }
 
+enum LogCommand {
+    Put = 0;
+    Remove = 1;
+}
+
+message LogEntry {
+    int32 term = 1;
+    int32 key = 2;
+    string value = 3;
+    LogCommand command = 4;
+}
+
 message AppendEntriesRequest {
     int32 term = 1;
     int32 leaderId = 2;
     int32 prevLogIndex = 3;
     int32 prevLogTerm = 4;
-    repeated KeyValue entries = 5;
+    repeated LogEntry entries = 5;
     int32 leaderCommitIndex = 6;
 }
 
 message AppendEntriesResponse {
     int32 term = 1;
-    bool success = 2;
+    int32 id = 2;
+    int32 ack = 3;
+    bool success = 4;
 }
 

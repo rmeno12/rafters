@@ -29,10 +29,10 @@ enum RaftNodeKind {
     Candidate,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum LogCommand {
-    Put,
-    Remove,
+    Put = 0,
+    Remove = 1,
 }
 
 #[derive(Clone)]
@@ -254,6 +254,8 @@ impl Raft for RaftersServer {
                     trace!("{}: Got heartbeat from {}", state.id, req.leader_id);
                     Ok(Response::new(AppendEntriesResponse {
                         term: state.term,
+                        id: state.id,
+                        ack: 0,
                         success: true,
                     }))
                 }
@@ -344,9 +346,11 @@ async fn replicate_log_to(
                 .get(prefix_len..)
                 .unwrap_or_default()
                 .iter()
-                .map(|entry| KeyValue {
+                .map(|entry| rafters::LogEntry {
+                    term: entry.term,
                     key: entry.key,
                     value: entry.value.clone(),
+                    command: entry.command as i32,
                 })
                 .collect();
             let to_ack_len = prefix_len + suffix.len();
