@@ -1,6 +1,7 @@
 use log::{error, info, trace, warn};
 use rand::prelude::Distribution;
 use std::collections::HashMap;
+use std::convert::{From, Into};
 use std::sync::Arc;
 use tokio::{
     sync::Mutex,
@@ -10,7 +11,6 @@ use tonic::{
     transport::{Channel, Endpoint, Server},
     Request, Response, Status,
 };
-use std::convert::{From, Into};
 
 pub mod rafters {
     tonic::include_proto!("rafters"); // The string specified here must match the proto package name
@@ -41,7 +41,7 @@ impl From<i32> for LogCommand {
         match item {
             0 => LogCommand::Put,
             1 => LogCommand::Remove,
-            _ => panic!("Unknown command type!")
+            _ => panic!("Unknown command type!"),
         }
     }
 }
@@ -109,6 +109,49 @@ impl RaftNodeState {
             other_nodes: HashMap::new(),
             sent_len: HashMap::new(),
             acked_len: HashMap::new(),
+        }
+    }
+
+    fn append_entries(
+        &mut self,
+        prefix_len: usize,
+        leader_commit_index: usize,
+        suffix: &[LogEntry],
+    ) {
+        if !suffix.is_empty() && self.log.len() > prefix_len {
+            let index = std::cmp::min(self.log.len(), prefix_len + suffix.len()) - 1;
+            if self.log.get(index).to_owned().unwrap().term
+                != suffix.get(index - prefix_len).to_owned().unwrap().term
+            {
+                self.log.truncate(prefix_len);
+            }
+        }
+        if prefix_len + suffix.len() > self.log.len() {
+            self.log.extend(
+                suffix
+                    .get((self.log.len() - prefix_len)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .cloned(),
+            );
+        }
+        if leader_commit_index > self.committed_index {
+            for i in self.committed_index..leader_commit_index {
+                let entry = self.log.get(i).unwrap().clone(); // TODO: do i need to check or default here?
+                self.apply(entry);
+            }
+            self.committed_index = leader_commit_index;
+        }
+    }
+
+    fn apply(&mut self, entry: LogEntry) {
+        match entry.command {
+            LogCommand::Put => {
+                self.kv.insert(entry.key, entry.value);
+            }
+            LogCommand::Remove => {
+                self.kv.remove(&entry.key);
+            }
         }
     }
 }
@@ -253,7 +296,11 @@ impl Raft for RaftersServer {
                 || state.log.last().cloned().unwrap().term == req.prev_log_term);
         if req.term == state.term && log_ok {
             let entries: Vec<LogEntry> = req.entries.into_iter().map(Into::into).collect();
-            append_entries(&mut state, req.prev_log_index as usize, req.leader_commit_index as usize, &entries);
+            state.append_entries(
+                req.prev_log_index as usize,
+                req.leader_commit_index as usize,
+                &entries,
+            );
             let ack = req.prev_log_index + entries.len() as i32;
             let resp = AppendEntriesResponse {
                 term: state.term,
@@ -272,25 +319,6 @@ impl Raft for RaftersServer {
             };
             Ok(Response::new(resp))
         }
-    }
-}
-
-fn append_entries(state: &mut RaftNodeState, prefix_len: usize, leader_commit_index: usize, suffix: &[LogEntry]) {
-    if !suffix.is_empty() && state.log.len() > prefix_len {
-        let index = std::cmp::min(state.log.len(), prefix_len + suffix.len()) - 1;
-        if state.log.get(index).to_owned().unwrap().term != suffix.get(index - prefix_len).to_owned().unwrap().term {
-            state.log.truncate(prefix_len);
-        }
-    }
-    if prefix_len + suffix.len() > state.log.len() {
-        state.log.extend(suffix.get((state.log.len()-prefix_len)..).unwrap_or_default().iter().cloned());
-    }
-    if leader_commit_index > state.committed_index {
-        for i in state.committed_index..leader_commit_index {
-            let entry = state.log.get(i).unwrap(); // TODO: do i need to check or default here?
-            // TODO: apply entry
-        }
-        state.committed_index = leader_commit_index;
     }
 }
 
