@@ -10,6 +10,7 @@ use tonic::{
     transport::{Channel, Endpoint, Server},
     Request, Response, Status,
 };
+use std::convert::{From, Into};
 
 pub mod rafters {
     tonic::include_proto!("rafters"); // The string specified here must match the proto package name
@@ -35,12 +36,33 @@ enum LogCommand {
     Remove = 1,
 }
 
+impl From<i32> for LogCommand {
+    fn from(item: i32) -> Self {
+        match item {
+            0 => LogCommand::Put,
+            1 => LogCommand::Remove,
+            _ => panic!("Unknown command type!")
+        }
+    }
+}
+
 #[derive(Clone)]
 struct LogEntry {
     term: i32,
     key: i32,
     value: String,
     command: LogCommand,
+}
+
+impl From<rafters::LogEntry> for LogEntry {
+    fn from(entry: rafters::LogEntry) -> Self {
+        LogEntry {
+            term: entry.term,
+            key: entry.key,
+            value: entry.value,
+            command: LogCommand::from(entry.command),
+        }
+    }
 }
 
 type NodeId = i32;
@@ -216,78 +238,77 @@ impl Raft for RaftersServer {
     ) -> Result<Response<AppendEntriesResponse>, Status> {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
-        // if req.term > state.term {
-        //     state.term = req.term;
-        //     state.voted_for = 0;
-        //     state.election_timeout_end = Instant::now() + Duration::from_secs(1);
-        // }
-        // if req.term == state.term {
-        //     state.kind = RaftNodeKind::Follower;
-        //     state.current_leader = req.leader_id;
-        // }
-        // let log_ok = state.log.len() as i32 >= req.prev_log_index
-        //     && (req.prev_log_index == 0
-        //         || state.log.last().cloned().unwrap().term == req.prev_log_term);
-        // if req.term == state.term && log_ok {
-        //     append_entries(&mut state, req.prev_log_index as usize, &req.entries);
-        //     let ack = req.prev_log_index + req.entries.len() as i32;
-        //     let resp = AppendEntriesResponse {
-        //         term: state.term,
-        //         success: true,
-        //     };
-        //     Ok(Response::new(resp))
-        // } else {
-        //     // send negative
-        //     let resp = AppendEntriesResponse {
-        //         term: state.term,
-        //         success: false,
-        //     };
-        //     Ok(Response::new(resp))
-        // }
-        match state.kind {
-            RaftNodeKind::Follower => {
-                if !req.entries.is_empty() {
-                    todo!()
-                } else {
-                    // TODO: handle bad requests?
-                    state.election_timeout_end = Instant::now() + Duration::from_secs(1);
-                    trace!("{}: Got heartbeat from {}", state.id, req.leader_id);
-                    Ok(Response::new(AppendEntriesResponse {
-                        term: state.term,
-                        id: state.id,
-                        ack: 0,
-                        success: true,
-                    }))
-                }
-            }
-            RaftNodeKind::Candidate => {
-                todo!()
-            }
-            RaftNodeKind::Leader => {
-                todo!()
-            }
+        if req.term > state.term {
+            state.term = req.term;
+            state.voted_for = 0;
+            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
         }
+        if req.term == state.term {
+            state.kind = RaftNodeKind::Follower;
+            state.current_leader = req.leader_id;
+        }
+        let log_ok = state.log.len() as i32 >= req.prev_log_index
+            && (req.prev_log_index == 0
+                || state.log.last().cloned().unwrap().term == req.prev_log_term);
+        if req.term == state.term && log_ok {
+            let entries: Vec<LogEntry> = req.entries.into_iter().map(Into::into).collect();
+            append_entries(&mut state, req.prev_log_index as usize, &entries);
+            let ack = req.prev_log_index + entries.len() as i32;
+            let resp = AppendEntriesResponse {
+                term: state.term,
+                id: state.id,
+                ack,
+                success: true,
+            };
+            Ok(Response::new(resp))
+        } else {
+            // send negative
+            let resp = AppendEntriesResponse {
+                term: state.term,
+                id: state.id,
+                ack: 0,
+                success: false,
+            };
+            Ok(Response::new(resp))
+        }
+        // match state.kind {
+        //     RaftNodeKind::Follower => {
+        //         if !req.entries.is_empty() {
+        //             todo!()
+        //         } else {
+        //             // TODO: handle bad requests?
+        //             state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+        //             trace!("{}: Got heartbeat from {}", state.id, req.leader_id);
+        //             Ok(Response::new(AppendEntriesResponse {
+        //                 term: state.term,
+        //                 id: state.id,
+        //                 ack: 0,
+        //                 success: true,
+        //             }))
+        //         }
+        //     }
+        //     RaftNodeKind::Candidate => {
+        //         todo!()
+        //     }
+        //     RaftNodeKind::Leader => {
+        //         todo!()
+        //     }
+        // }
     }
 }
 
-fn append_entries(state: &mut RaftNodeState, prefix_len: usize, suffix: &[KeyValue]) {
-    if suffix.is_empty() {
-        return;
-    } else {
-        todo!();
-    }
-    // TODO: adjust inter-node communication to send LogEntry's instead of KeyValues
+fn append_entries(state: &mut RaftNodeState, prefix_len: usize, leader_commit_index: usize, suffix: &[LogEntry]) {
     if !suffix.is_empty() && state.log.len() > prefix_len {
-        todo!();
-        // let index = std::cmp::min(state.log.len(), prefix_len + suffix.len()) - 1;
-        // if state.log.get(index).to_owned().unwrap().term != suffix.get(index - prefix_len).to_owned().unwrap().term {
-        //     state.log.truncate(prefix_len);
-        // }
+        let index = std::cmp::min(state.log.len(), prefix_len + suffix.len()) - 1;
+        if state.log.get(index).to_owned().unwrap().term != suffix.get(index - prefix_len).to_owned().unwrap().term {
+            state.log.truncate(prefix_len);
+        }
     }
     if prefix_len + suffix.len() > state.log.len() {
-        state.log.extend(suffix.get((state.log.len()-prefix_len)..).into_iter().map(|thing| {
-            todo!();
-        }));
+        state.log.extend(suffix.get((state.log.len()-prefix_len)..).unwrap_or_default().iter().cloned());
+    }
+    if leader_commit_index > state.committed_index {
+        for i in state.committed_index..leader_commit_index
     }
 }
 
