@@ -246,13 +246,14 @@ impl Raft for RaftersServer {
         if req.term == state.term {
             state.kind = RaftNodeKind::Follower;
             state.current_leader = req.leader_id;
+            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
         }
         let log_ok = state.log.len() as i32 >= req.prev_log_index
             && (req.prev_log_index == 0
                 || state.log.last().cloned().unwrap().term == req.prev_log_term);
         if req.term == state.term && log_ok {
             let entries: Vec<LogEntry> = req.entries.into_iter().map(Into::into).collect();
-            append_entries(&mut state, req.prev_log_index as usize, &entries);
+            append_entries(&mut state, req.prev_log_index as usize, req.leader_commit_index as usize, &entries);
             let ack = req.prev_log_index + entries.len() as i32;
             let resp = AppendEntriesResponse {
                 term: state.term,
@@ -271,29 +272,6 @@ impl Raft for RaftersServer {
             };
             Ok(Response::new(resp))
         }
-        // match state.kind {
-        //     RaftNodeKind::Follower => {
-        //         if !req.entries.is_empty() {
-        //             todo!()
-        //         } else {
-        //             // TODO: handle bad requests?
-        //             state.election_timeout_end = Instant::now() + Duration::from_secs(1);
-        //             trace!("{}: Got heartbeat from {}", state.id, req.leader_id);
-        //             Ok(Response::new(AppendEntriesResponse {
-        //                 term: state.term,
-        //                 id: state.id,
-        //                 ack: 0,
-        //                 success: true,
-        //             }))
-        //         }
-        //     }
-        //     RaftNodeKind::Candidate => {
-        //         todo!()
-        //     }
-        //     RaftNodeKind::Leader => {
-        //         todo!()
-        //     }
-        // }
     }
 }
 
@@ -308,7 +286,11 @@ fn append_entries(state: &mut RaftNodeState, prefix_len: usize, leader_commit_in
         state.log.extend(suffix.get((state.log.len()-prefix_len)..).unwrap_or_default().iter().cloned());
     }
     if leader_commit_index > state.committed_index {
-        for i in state.committed_index..leader_commit_index
+        for i in state.committed_index..leader_commit_index {
+            let entry = state.log.get(i).unwrap(); // TODO: do i need to check or default here?
+            // TODO: apply entry
+        }
+        state.committed_index = leader_commit_index;
     }
 }
 
