@@ -1,0 +1,2 @@
+#!/bin/bash
+grpcurl -plaintext -proto proto/rafters.proto -d '{"key": 2, "value": "two"}' [::1]:900$1 rafters.Raft.put

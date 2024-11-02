@@ -90,11 +90,15 @@ impl Timeouts {
     const VOTE_RESPONSE: Duration = Duration::from_millis(250);
 }
 
+// TODO: rethink all unwraps
+
 impl RaftNodeState {
     fn new(id: i32) -> Self {
         let election_timeout_dist = rand::distributions::Uniform::from(0.8..=1.2);
         let mut rng = rand::thread_rng();
         let election_timeout = election_timeout_dist.sample(&mut rng);
+        let mut acked_len = HashMap::new();
+        acked_len.insert(id, 0);
         Self {
             id,
             kind: RaftNodeKind::Follower,
@@ -108,7 +112,7 @@ impl RaftNodeState {
             kv: HashMap::new(),
             other_nodes: HashMap::new(),
             sent_len: HashMap::new(),
-            acked_len: HashMap::new(),
+            acked_len,
         }
     }
 
@@ -204,6 +208,7 @@ impl Raft for RaftersServer {
         let mut state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {
             let req = request.into_inner();
+            info!("{}: Got add request ({}, {})", state.id, req.key, req.value);
             let new_entry = LogEntry {
                 term: state.term,
                 key: req.key,
@@ -211,9 +216,29 @@ impl Raft for RaftersServer {
                 command: LogCommand::Put,
             };
             state.log.push(new_entry);
+            let id = state.id;
+            let len = state.log.len();
+            state.acked_len.insert(id, len);
+            replicate_log(&state, self.node_state.clone()).await;
             Ok(Response::new(Empty {}))
         } else {
-            todo!()
+            let req = request.get_ref();
+            info!(
+                "{}: Forwarding add request ({}, {})",
+                state.id, req.key, req.value
+            );
+            let leader = state.current_leader;
+            if leader != 0 {
+                state
+                    .other_nodes
+                    .get(&leader)
+                    .unwrap()
+                    .clone()
+                    .put(request)
+                    .await
+            } else {
+                Err(Status::unavailable("Leader unknown!"))
+            }
         }
     }
 
@@ -225,8 +250,10 @@ impl Raft for RaftersServer {
             error!("Couldn't connect to new node {}", server_num);
             panic!()
         });
-        let servers = &mut self.node_state.lock().await.other_nodes;
-        servers.insert(server_num, client);
+        let mut state = self.node_state.lock().await;
+        state.other_nodes.insert(server_num, client);
+        state.acked_len.insert(server_num, 0);
+        state.sent_len.insert(server_num, 0);
         Ok(Response::new(Empty {}))
     }
 
@@ -296,6 +323,9 @@ impl Raft for RaftersServer {
                 || state.log.last().cloned().unwrap().term == req.prev_log_term);
         if req.term == state.term && log_ok {
             let entries: Vec<LogEntry> = req.entries.into_iter().map(Into::into).collect();
+            if !entries.is_empty() {
+                info!("{}: Adding new entries", state.id);
+            }
             state.append_entries(
                 req.prev_log_index as usize,
                 req.leader_commit_index as usize,
