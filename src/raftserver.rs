@@ -177,8 +177,6 @@ impl Raft for RaftersServer {
     }
 
     async fn get(&self, request: Request<IntegerArg>) -> Result<Response<KeyValue>, Status> {
-        // only do following as leader
-        // read from kv and send data back
         let state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {
             let req = request.into_inner();
@@ -194,17 +192,24 @@ impl Raft for RaftersServer {
                 ))),
             }
         } else {
-            todo!()
+            let req = request.get_ref();
+            info!("{}: Forwarding get request ({})", state.id, req.arg);
+            let leader = state.current_leader;
+            if leader != 0 {
+                state
+                    .other_nodes
+                    .get(&leader)
+                    .unwrap()
+                    .clone()
+                    .get(request)
+                    .await
+            } else {
+                Err(Status::unavailable("Leader unknown!"))
+            }
         }
     }
 
     async fn put(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
-        // only do following as leader
-        // add add command to log
-        // send append entry rpcs to other servers in parallel
-        // keep sending until they accept (some error handling described in paper)
-        // once they all accept, add new thing to kv
-        // send response to client
         let mut state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {
             let req = request.into_inner();
