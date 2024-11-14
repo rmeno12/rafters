@@ -12,20 +12,18 @@ pub mod rafters {
 }
 
 use rafters::frontend_server::{Frontend, FrontendServer};
-use rafters::raft_client::RaftClient;
-use rafters::{Empty, IntegerArg, KeyValue, State};
+use rafters::key_value_store_client::KeyValueStoreClient;
+use rafters::{GetKey, IntegerArg, KeyValue, Reply};
 
-type ChildMap = HashMap<i32, (std::process::Child, RaftClient<Channel>)>;
+type ChildMap = HashMap<i32, (std::process::Child, KeyValueStoreClient<Channel>)>;
 
 pub struct RaftersFrontend {
-    term: i32,
     servers: Arc<Mutex<ChildMap>>,
 }
 
 impl Default for RaftersFrontend {
     fn default() -> Self {
         Self {
-            term: -1,
             servers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -33,14 +31,22 @@ impl Default for RaftersFrontend {
 
 #[tonic::async_trait]
 impl Frontend for RaftersFrontend {
-    async fn get_state(&self, _request: Request<Empty>) -> Result<Response<State>, Status> {
-        Ok(Response::new(State {
-            term: self.term,
-            is_leader: false,
-        }))
+    async fn get(&self, request: Request<GetKey>) -> Result<Response<Reply>, Status> {
+        // ask leader for info
+        todo!()
     }
 
-    async fn start_raft(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
+    async fn put(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
+        // tell leader
+        todo!()
+    }
+
+    async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
+        // tell leader
+        todo!()
+    }
+
+    async fn start_raft(&self, request: Request<IntegerArg>) -> Result<Response<Reply>, Status> {
         let child_binary = if cfg!(debug_assertions) {
             "target/debug/raftserver"
         } else {
@@ -63,10 +69,12 @@ impl Frontend for RaftersFrontend {
         for (i, child) in (1..=num_servers).zip(children) {
             let endpoint = Endpoint::from_shared(format!("http://[::1]:{}", 9000 + i)).unwrap();
             info!("Connecting to node {} on {:?}", i, endpoint.uri());
-            let client = RaftClient::connect(endpoint).await.unwrap_or_else(|_| {
-                error!("Couldn't connect to raft node {}", i);
-                panic!()
-            });
+            let client = KeyValueStoreClient::connect(endpoint)
+                .await
+                .unwrap_or_else(|_| {
+                    error!("Couldn't connect to raft node {}", i);
+                    panic!()
+                });
             servers.insert(i, (child, client));
         }
         for (num, (_, client)) in servers.iter_mut() {
@@ -76,32 +84,15 @@ impl Frontend for RaftersFrontend {
                 }
             }
         }
-        Ok(Response::new(Empty {}))
-    }
-
-    async fn add_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
-        todo!()
-    }
-
-    async fn remove_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
-        todo!()
-    }
-
-    async fn get(&self, request: Request<IntegerArg>) -> Result<Response<KeyValue>, Status> {
-        // ask leader for info
-        todo!()
-    }
-
-    async fn put(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
-        // tell leader
-        todo!()
-    }
-
-    async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
-        // tell leader
-        todo!()
+        Ok(Response::new(Reply {
+            wrong_leader: false,
+            error: String::from(""),
+            value: String::from(""),
+        }))
     }
 }
+// TODO: track some data by periodically getting all node states to find which is the leader, maybe
+// once every 3-4 seconds?
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

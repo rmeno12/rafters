@@ -16,11 +16,11 @@ pub mod rafters {
     tonic::include_proto!("rafters"); // The string specified here must match the proto package name
 }
 
-use rafters::raft_client::RaftClient;
-use rafters::raft_server::{Raft, RaftServer};
+use rafters::key_value_store_client::KeyValueStoreClient;
+use rafters::key_value_store_server::{KeyValueStore, KeyValueStoreServer};
 use rafters::{
-    AppendEntriesRequest, AppendEntriesResponse, Empty, IntegerArg, KeyValue, State, VoteRequest,
-    VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, Empty, GetKey, IntegerArg, KeyValue, Reply, State,
+    VoteRequest, VoteResponse,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl From<i32> for LogCommand {
 #[derive(Clone)]
 struct LogEntry {
     term: i32,
-    key: i32,
+    key: String,
     value: String,
     command: LogCommand,
 }
@@ -65,7 +65,7 @@ impl From<rafters::LogEntry> for LogEntry {
     }
 }
 
-type NodeId = i32;
+type NodeId = i64;
 
 struct RaftNodeState {
     id: NodeId,
@@ -77,8 +77,8 @@ struct RaftNodeState {
     votes_received: Vec<NodeId>,
     log: Vec<LogEntry>,
     committed_index: usize,
-    kv: HashMap<i32, String>,
-    other_nodes: HashMap<NodeId, RaftClient<Channel>>,
+    kv: HashMap<String, String>,
+    other_nodes: HashMap<NodeId, KeyValueStoreClient<Channel>>,
     sent_len: HashMap<NodeId, usize>,
     acked_len: HashMap<NodeId, usize>,
 }
@@ -93,7 +93,7 @@ impl Timeouts {
 // TODO: rethink all unwraps
 
 impl RaftNodeState {
-    fn new(id: i32) -> Self {
+    fn new(id: NodeId) -> Self {
         let election_timeout_dist = rand::distributions::Uniform::from(0.8..=1.2);
         let mut rng = rand::thread_rng();
         let election_timeout = election_timeout_dist.sample(&mut rng);
@@ -171,20 +171,26 @@ impl RaftersServer {
 }
 
 #[tonic::async_trait]
-impl Raft for RaftersServer {
+impl KeyValueStore for RaftersServer {
     async fn get_state(&self, _request: Request<Empty>) -> Result<Response<State>, Status> {
-        todo!()
+        let state = self.node_state.lock().await;
+        Ok(Response::new(State {
+            term: state.term,
+            is_leader: state.kind == RaftNodeKind::Leader,
+        }))
     }
 
-    async fn get(&self, request: Request<IntegerArg>) -> Result<Response<KeyValue>, Status> {
+    // TODO: figure out what to do with clientid and requestid
+    async fn get(&self, request: Request<GetKey>) -> Result<Response<Reply>, Status> {
         let state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {
             let req = request.into_inner();
-            let key = req.arg;
+            let key = req.key;
             match state.kv.get(&key) {
-                Some(val) => Ok(Response::new(KeyValue {
-                    key,
-                    value: val.clone(),
+                Some(val) => Ok(Response::new(Reply {
+                    wrong_leader: false,
+                    error: String::from(""),
+                    value: val.to_string(),
                 })),
                 None => Err(Status::invalid_argument(format!(
                     "Key {} not in store!",
@@ -193,7 +199,7 @@ impl Raft for RaftersServer {
             }
         } else {
             let req = request.get_ref();
-            info!("{}: Forwarding get request ({})", state.id, req.arg);
+            info!("{}: Forwarding get request ({})", state.id, req.key);
             let leader = state.current_leader;
             if leader != 0 {
                 state
@@ -209,7 +215,7 @@ impl Raft for RaftersServer {
         }
     }
 
-    async fn put(&self, request: Request<KeyValue>) -> Result<Response<Empty>, Status> {
+    async fn put(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
         let mut state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {
             let req = request.into_inner();
@@ -225,7 +231,12 @@ impl Raft for RaftersServer {
             let len = state.log.len();
             state.acked_len.insert(id, len);
             replicate_log(&state, self.node_state.clone()).await;
-            Ok(Response::new(Empty {}))
+            // TODO: figure out what other fields are needed?
+            Ok(Response::new(Reply {
+                wrong_leader: false,
+                error: String::from(""),
+                value: String::from(""),
+            }))
         } else {
             let req = request.get_ref();
             info!(
@@ -247,14 +258,20 @@ impl Raft for RaftersServer {
         }
     }
 
+    async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
+        self.put(request).await
+    }
+
     async fn add_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
-        let server_num = request.into_inner().arg;
+        let server_num = request.into_inner().arg.into();
         let endpoint =
             Endpoint::from_shared(format!("http://[::1]:{}", 9000 + server_num)).unwrap();
-        let client = RaftClient::connect(endpoint).await.unwrap_or_else(|_| {
-            error!("Couldn't connect to new node {}", server_num);
-            panic!()
-        });
+        let client = KeyValueStoreClient::connect(endpoint)
+            .await
+            .unwrap_or_else(|_| {
+                error!("Couldn't connect to new node {}", server_num);
+                panic!()
+            });
         let mut state = self.node_state.lock().await;
         state.other_nodes.insert(server_num, client);
         state.acked_len.insert(server_num, 0);
@@ -262,10 +279,11 @@ impl Raft for RaftersServer {
         Ok(Response::new(Empty {}))
     }
 
+    // TODO: this may be removable?
     async fn remove_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
         let server_num = request.into_inner().arg;
         let servers = &mut self.node_state.lock().await.other_nodes;
-        servers.remove(&server_num);
+        servers.remove(&server_num.into());
         Ok(Response::new(Empty {}))
     }
 
@@ -394,7 +412,7 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
 async fn replicate_log_to(
     node_state: Arc<Mutex<RaftNodeState>>,
     client_id: NodeId,
-    client: RaftClient<Channel>,
+    client: KeyValueStoreClient<Channel>,
 ) -> tokio::task::JoinHandle<()> {
     let mut client = client.clone();
     let this_state = node_state.clone();
@@ -414,7 +432,7 @@ async fn replicate_log_to(
                 .iter()
                 .map(|entry| rafters::LogEntry {
                     term: entry.term,
-                    key: entry.key,
+                    key: entry.key.clone(),
                     value: entry.value.clone(),
                     command: entry.command as i32,
                 })
@@ -561,7 +579,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let node_num: i32 = args.get(1).unwrap().parse()?;
+    let node_num: i64 = args.get(1).unwrap().parse()?;
 
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
@@ -576,7 +594,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(follower_candidate_loop(raft_node_state.clone()));
 
     Server::builder()
-        .add_service(RaftServer::new(raftserver))
+        .add_service(KeyValueStoreServer::new(raftserver))
         .serve(addr)
         .await?;
 

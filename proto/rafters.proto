@@ -2,24 +2,22 @@ syntax = "proto3";
 package rafters;
 
 service Frontend {
-    rpc getState (Empty) returns (State);
-    rpc startRaft (IntegerArg) returns (Empty);
-    rpc addServer (IntegerArg) returns (Empty);
-    rpc removeServer (IntegerArg) returns (Empty);
-    rpc get (IntegerArg) returns (KeyValue);
-    rpc put (KeyValue) returns (Empty);
-    rpc replace (KeyValue) returns (Empty);
+    rpc Get(GetKey) returns (Reply) {};
+    rpc Put(KeyValue) returns (Reply){};
+    rpc Replace(KeyValue) returns (Reply){};
+    rpc StartRaft(IntegerArg) returns (Reply){};
 }
 
-service Raft {
-    rpc getState (Empty) returns (State);
-    rpc get (IntegerArg) returns (KeyValue);
-    rpc put (KeyValue) returns (Empty);
+service KeyValueStore {
+    rpc GetState(Empty) returns (State) {};
+    rpc Get(GetKey) returns (Reply) {};
+    rpc Put(KeyValue) returns (Reply){};
+    rpc Replace(KeyValue) returns (Reply){};
 
-    rpc addServer (IntegerArg) returns (Empty);
-    rpc removeServer (IntegerArg) returns (Empty);
-    rpc requestVote (VoteRequest) returns (VoteResponse);
-    rpc appendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+    rpc AddServer (IntegerArg) returns (Empty);
+    rpc RemoveServer (IntegerArg) returns (Empty);
+    rpc RequestVote (VoteRequest) returns (VoteResponse);
+    rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
 }
 
 message Empty {}
@@ -30,17 +28,31 @@ message State {
 }
 
 message KeyValue {
-    int32 key =  1;
+    string key = 1;
     string value = 2;
+    int64 ClientId = 3;
+    int64 RequestId = 4;
 }
 
 message IntegerArg {
     int32 arg = 1;
 }
 
+message GetKey {
+    string key = 1;
+    int64 ClientId = 2;
+    int64 RequestId = 3;
+}
+
+message Reply {
+    bool wrongLeader = 1;
+    string error = 2;
+    string value = 3;
+}
+
 message VoteRequest {
     int32 term = 1;
-    int32 candidateId = 2;
+    int64 candidateId = 2;
     int32 lastLogIndex = 3;
     int32 lastLogTerm = 4;
 }
@@ -57,14 +69,14 @@ enum LogCommand {
 
 message LogEntry {
     int32 term = 1;
-    int32 key = 2;
+    string key = 2;
     string value = 3;
     LogCommand command = 4;
 }
 
 message AppendEntriesRequest {
     int32 term = 1;
-    int32 leaderId = 2;
+    int64 leaderId = 2;
     int32 prevLogIndex = 3;
     int32 prevLogTerm = 4;
     repeated LogEntry entries = 5;
@@ -73,7 +85,7 @@ message AppendEntriesRequest {
 
 message AppendEntriesResponse {
     int32 term = 1;
-    int32 id = 2;
+    int64 id = 2;
     int32 ack = 3;
     bool success = 4;
 }
