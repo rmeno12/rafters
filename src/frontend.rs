@@ -17,15 +17,27 @@ use rafters::{GetKey, IntegerArg, KeyValue, Reply};
 
 type ChildMap = HashMap<i32, (std::process::Child, KeyValueStoreClient<Channel>)>;
 
-pub struct RaftersFrontend {
-    servers: Arc<Mutex<ChildMap>>,
+struct FrontendState {
+    servers: ChildMap,
+    current_leader: i32,
 }
 
-impl Default for RaftersFrontend {
-    fn default() -> Self {
+impl FrontendState {
+    fn new() -> Self {
         Self {
-            servers: Arc::new(Mutex::new(HashMap::new())),
+            servers: ChildMap::new(),
+            current_leader: 0,
         }
+    }
+}
+
+pub struct RaftersFrontend {
+    state: Arc<Mutex<FrontendState>>,
+}
+
+impl RaftersFrontend {
+    fn new(state: Arc<Mutex<FrontendState>>) -> Self {
+        Self { state }
     }
 }
 
@@ -52,8 +64,8 @@ impl Frontend for RaftersFrontend {
         } else {
             "target/release/raftserver"
         };
+        let mut state = self.state.lock().await;
         let num_servers = request.into_inner().arg;
-        let mut servers = self.servers.lock().await;
         let children: Vec<std::process::Child> = (1..=num_servers)
             .map(|i| {
                 let child = std::process::Command::new(child_binary)
@@ -75,9 +87,9 @@ impl Frontend for RaftersFrontend {
                     error!("Couldn't connect to raft node {}", i);
                     panic!()
                 });
-            servers.insert(i, (child, client));
+            state.servers.insert(i, (child, client));
         }
-        for (num, (_, client)) in servers.iter_mut() {
+        for (num, (_, client)) in state.servers.iter_mut() {
             for i in 1..=num_servers {
                 if i != *num {
                     client.add_server(IntegerArg { arg: i }).await?;
@@ -100,7 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env);
 
     let addr = "[::1]:8001".parse().unwrap();
-    let frontend = RaftersFrontend::default();
+    let frontend_state = Arc::new(Mutex::new(FrontendState::new()));
+    let frontend = RaftersFrontend::new(frontend_state);
 
     info!("Starting frontend. Listening on {}", addr);
 
