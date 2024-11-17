@@ -140,9 +140,13 @@ impl RaftNodeState {
             );
         }
         if leader_commit_index > self.committed_index {
+            trace!(
+                "{}: Found out about leader commits. Applying locally up to {}",
+                self.id,
+                leader_commit_index
+            );
             for i in self.committed_index..leader_commit_index {
-                let entry = self.log.get(i).unwrap().clone(); // TODO: do i need to check or default here?
-                self.apply(entry);
+                self.apply(self.log[i].clone());
             }
             self.committed_index = leader_commit_index;
         }
@@ -156,6 +160,31 @@ impl RaftNodeState {
             LogCommand::Remove => {
                 self.kv.remove(&entry.key);
             }
+        }
+    }
+
+    fn commit(&mut self) {
+        let quorum_size = (self.other_nodes.len() + 1 + 1 + 2) / 2; // +1 to include leader, +1 to
+                                                                    // be over half, +2 to round up
+        let ready = (0..=self.log.len())
+            .rev()
+            .find(|i| self.acked_len.values().filter(|&acked| acked >= i).count() >= quorum_size)
+            .unwrap_or(0);
+        trace!(
+            "{}: Considering commit (ready={}, committed={})",
+            self.id,
+            ready,
+            self.committed_index
+        );
+        if ready > 0
+            && ready > self.committed_index
+            && self.log.get(ready - 1).unwrap().term == self.term
+        {
+            info!("{}: Committing up to {}", self.id, ready);
+            for i in self.committed_index..ready {
+                self.apply(self.log[i].clone());
+            }
+            self.committed_index = ready;
         }
     }
 }
@@ -386,10 +415,10 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         let req = AppendEntriesRequest {
             term: state.term,
             leader_id: id,
-            prev_log_index: 0,
-            prev_log_term: 0,
+            prev_log_index: state.log.len() as i32,
+            prev_log_term: state.log.last().map(|entry| entry.term).unwrap_or(0),
             entries: vec![],
-            leader_commit_index: 0,
+            leader_commit_index: state.committed_index as i32,
         };
         let _vec_resps: Vec<_> = state
             .other_nodes
@@ -419,6 +448,7 @@ async fn replicate_log_to(
     tokio::spawn(async move {
         loop {
             let mut state = this_state.lock().await;
+            trace!("{}: Replicating log to {}", state.id, client_id);
             let prefix_len = state.sent_len.get(&client_id).copied().unwrap_or_default();
             let prefix_term = if prefix_len > 0 {
                 state.log.get(prefix_len - 1).unwrap().term
@@ -454,8 +484,15 @@ async fn replicate_log_to(
                     let mut done = true;
                     if resp.term == state.term && state.kind == RaftNodeKind::Leader {
                         if resp.success {
+                            trace!(
+                                "{}: Replicated to {}. Now acked {}",
+                                state.id,
+                                client_id,
+                                to_ack_len
+                            );
                             state.sent_len.insert(client_id, to_ack_len);
                             state.acked_len.insert(client_id, to_ack_len);
+                            state.commit();
                         } else if state.sent_len.get(&client_id).copied().unwrap_or_default() > 0 {
                             let l = state.sent_len.get(&client_id).copied().unwrap_or_default();
                             state.sent_len.insert(client_id, l - 1);
