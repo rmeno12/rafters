@@ -1,2 +1,2 @@
 #!/bin/bash
-grpcurl -plaintext -proto proto/rafters.proto -d '{"arg": 3}' [::1]:8001 rafters.Frontend.StartRaft
+grpcurl -plaintext -proto proto/rafters.proto -d '{"arg": 4}' [::1]:8001 rafters.Frontend.StartRaft

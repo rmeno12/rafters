@@ -1,5 +1,6 @@
 use log::{error, info, trace, warn};
 use rand::prelude::Distribution;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::{From, Into};
 use std::sync::Arc;
@@ -30,7 +31,7 @@ enum RaftNodeKind {
     Candidate,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 enum LogCommand {
     Put = 0,
     Remove = 1,
@@ -46,7 +47,7 @@ impl From<i32> for LogCommand {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct LogEntry {
     term: i32,
     key: String,
@@ -72,15 +73,22 @@ struct RaftNodeState {
     kind: RaftNodeKind,
     term: i32,
     current_leader: NodeId,
+
     election_timeout_end: Instant,
     voted_for: NodeId,
     votes_received: Vec<NodeId>,
+
     log: Vec<LogEntry>,
+
     committed_index: usize,
+
     kv: HashMap<String, String>,
+
     other_nodes: HashMap<NodeId, KeyValueStoreClient<Channel>>,
     sent_len: HashMap<NodeId, usize>,
     acked_len: HashMap<NodeId, usize>,
+
+    log_file_path: String,
 }
 
 struct Timeouts;
@@ -93,16 +101,17 @@ impl Timeouts {
 // TODO: rethink all unwraps
 
 impl RaftNodeState {
-    fn new(id: NodeId) -> Self {
+    fn new(id: NodeId, log_file_path: String) -> Self {
         let election_timeout_dist = rand::distributions::Uniform::from(0.8..=1.2);
         let mut rng = rand::thread_rng();
         let election_timeout = election_timeout_dist.sample(&mut rng);
         let mut acked_len = HashMap::new();
         acked_len.insert(id, 0);
-        Self {
+
+        let mut state = Self {
             id,
             kind: RaftNodeKind::Follower,
-            term: 1,
+            term: 0,
             current_leader: 0,
             election_timeout_end: Instant::now() + Duration::from_secs_f64(election_timeout),
             voted_for: 0,
@@ -113,7 +122,11 @@ impl RaftNodeState {
             other_nodes: HashMap::new(),
             sent_len: HashMap::new(),
             acked_len,
-        }
+            log_file_path,
+        };
+        state.recover();
+        state.persist();
+        state
     }
 
     fn append_entries(
@@ -149,6 +162,7 @@ impl RaftNodeState {
                 self.apply(self.log[i].clone());
             }
             self.committed_index = leader_commit_index;
+            self.persist();
         }
     }
 
@@ -185,7 +199,29 @@ impl RaftNodeState {
                 self.apply(self.log[i].clone());
             }
             self.committed_index = ready;
+            self.persist();
         }
+    }
+
+    fn recover(&mut self) {
+        match std::fs::read_to_string(self.log_file_path.clone()).ok() {
+            Some(json) => {
+                let (term, voted_for, log): (i32, NodeId, Vec<LogEntry>) =
+                    serde_json::from_str(&json).expect("Unable to parse data from json");
+                self.term = term;
+                self.voted_for = voted_for;
+                self.log = log;
+            }
+            None => {
+                info!("{}: Unable to access log file to recover from.", self.id);
+            }
+        }
+    }
+
+    fn persist(&self) {
+        let data = (self.term, self.voted_for, self.log.clone());
+        let json = serde_json::to_string_pretty(&data).expect("Unable to convert data to json");
+        std::fs::write(self.log_file_path.clone(), json).expect("Unable to write json to file");
     }
 }
 
@@ -329,6 +365,7 @@ impl KeyValueStore for RaftersServer {
             state.term = req.term;
             state.kind = RaftNodeKind::Follower;
             state.voted_for = 0;
+            state.persist();
         }
         let last_log_term = if !state.log.is_empty() {
             state.log.last().unwrap().term
@@ -347,6 +384,7 @@ impl KeyValueStore for RaftersServer {
         if grant_vote {
             state.voted_for = req.candidate_id;
             state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.persist();
         }
         Ok(Response::new(VoteResponse {
             term: state.term,
@@ -364,6 +402,7 @@ impl KeyValueStore for RaftersServer {
             state.term = req.term;
             state.voted_for = 0;
             state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.persist();
         }
         if req.term == state.term {
             state.kind = RaftNodeKind::Follower;
@@ -411,6 +450,8 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         if state.kind != RaftNodeKind::Leader {
             continue;
         }
+        replicate_log(&state, node_state.clone()).await;
+        continue;
         let id = state.id;
         let req = AppendEntriesRequest {
             term: state.term,
@@ -543,10 +584,15 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
 
         // Election timed out and we are a follower, so time to start a new
         // election and request votes from all other raft nodes
-        info!("{}: Election timer ran out, starting election", state.id);
+        info!(
+            "{}: Election timer ran out, starting election for term {}",
+            state.id,
+            state.term + 1
+        );
         state.term += 1;
         state.kind = RaftNodeKind::Candidate;
         state.voted_for = state.id;
+        state.persist();
         state.votes_received = vec![state.id];
         let last_log_term = if !state.log.is_empty() {
             state.log.last().unwrap().term
@@ -600,6 +646,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                                 state.kind = RaftNodeKind::Follower;
                                 state.voted_for = 0;
                                 state.election_timeout_end += Duration::from_secs(1);
+                                state.persist();
                             }
                         }
                         _ => {
@@ -624,7 +671,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("[::1]:{}", 9000 + node_num).parse().unwrap();
     info!("Starting raft node {}. Listening on {}", node_num, addr);
 
-    let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(node_num)));
+    let node_log_path = format!("raftlog_{}", node_num);
+    let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(node_num, node_log_path)));
     let raftserver = RaftersServer::new(raft_node_state.clone());
 
     tokio::spawn(leader_loop(raft_node_state.clone()));

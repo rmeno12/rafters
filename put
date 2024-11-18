@@ -1,2 +1,2 @@
 #!/bin/bash
-grpcurl -plaintext -proto proto/rafters.proto -d '{"key": "2", "value": "two"}' [::1]:900$1 rafters.KeyValueStore.Put
+grpcurl -plaintext -proto proto/rafters.proto -d "{\"key\": \"$2\", \"value\": \"$3\"}" [::1]:900$1 rafters.KeyValueStore.Put

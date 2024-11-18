@@ -1,7 +1,6 @@
 # rafters
 
 TODO:
-- log persistence + recovery
 - implement frontend things
 - test failures:
   - fail non-leaders
