@@ -264,16 +264,17 @@ impl KeyValueStore for RaftersServer {
             }
         } else {
             let req = request.get_ref();
-            info!("{}: Forwarding get request ({})", state.id, req.key);
+            info!(
+                "{}: Got get request ({}), but am not leader",
+                state.id, req.key
+            );
             let leader = state.current_leader;
             if leader != 0 {
-                state
-                    .other_nodes
-                    .get(&leader)
-                    .unwrap()
-                    .clone()
-                    .get(request)
-                    .await
+                Ok(Response::new(Reply {
+                    wrong_leader: true,
+                    error: String::new(),
+                    value: leader.to_string(),
+                }))
             } else {
                 Err(Status::unavailable("Leader unknown!"))
             }
@@ -305,18 +306,16 @@ impl KeyValueStore for RaftersServer {
         } else {
             let req = request.get_ref();
             info!(
-                "{}: Forwarding add request ({}, {})",
+                "{}: Got add request ({}, {}), but am not leader",
                 state.id, req.key, req.value
             );
             let leader = state.current_leader;
             if leader != 0 {
-                state
-                    .other_nodes
-                    .get(&leader)
-                    .unwrap()
-                    .clone()
-                    .put(request)
-                    .await
+                Ok(Response::new(Reply {
+                    wrong_leader: true,
+                    error: String::new(),
+                    value: leader.to_string(),
+                }))
             } else {
                 Err(Status::unavailable("Leader unknown!"))
             }
