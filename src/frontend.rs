@@ -2,6 +2,7 @@ use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tonic::{
     transport::{Channel, Endpoint, Server},
     Request, Response, Status,
@@ -45,11 +46,23 @@ impl RaftersFrontend {
 impl Frontend for RaftersFrontend {
     async fn get(&self, request: Request<GetKey>) -> Result<Response<Reply>, Status> {
         // ask leader for info
+        let mut state = self.state.lock().await;
+        let leader_id = state.current_leader;
+        if leader_id == 0 {
+            return Err(Status::unavailable("Raft cluster not started yet!"));
+        }
+        let (_, leader_client) = &state.servers[&leader_id];
+        let mut leader_client = leader_client.clone();
+        let response = timeout(Duration::from_millis(250), leader_client.get(request)).await;
         todo!()
     }
 
     async fn put(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
         // tell leader
+        let mut state = self.state.lock().await;
+        if state.current_leader == 0 {
+            return Err(Status::unavailable("Raft cluster not started yet!"));
+        }
         todo!()
     }
 
@@ -96,6 +109,7 @@ impl Frontend for RaftersFrontend {
                 }
             }
         }
+        state.current_leader = 1; // Guess that node 1 is the leader
         Ok(Response::new(Reply {
             wrong_leader: false,
             error: String::from(""),

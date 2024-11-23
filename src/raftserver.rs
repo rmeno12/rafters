@@ -293,6 +293,7 @@ impl KeyValueStore for RaftersServer {
                 command: LogCommand::Put,
             };
             state.log.push(new_entry);
+            state.persist();
             let id = state.id;
             let len = state.log.len();
             state.acked_len.insert(id, len);
