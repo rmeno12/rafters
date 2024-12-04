@@ -1,7 +1,7 @@
 syntax = "proto3";
-package rafters;
+package raftkv;
 
-service Frontend {
+service FrontEnd {
     rpc Get(GetKey) returns (Reply) {};
     rpc Put(KeyValue) returns (Reply){};
     rpc Replace(KeyValue) returns (Reply){};

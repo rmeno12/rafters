@@ -14,7 +14,7 @@ use tonic::{
 };
 
 pub mod rafters {
-    tonic::include_proto!("rafters"); // The string specified here must match the proto package name
+    tonic::include_proto!("raftkv"); // The string specified here must match the proto package name
 }
 
 use rafters::key_value_store_client::KeyValueStoreClient;

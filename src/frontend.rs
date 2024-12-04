@@ -9,14 +9,16 @@ use tonic::{
 };
 
 pub mod rafters {
-    tonic::include_proto!("rafters");
+    tonic::include_proto!("raftkv");
 }
 
-use rafters::frontend_server::{Frontend, FrontendServer};
+use rafters::front_end_server::{FrontEnd, FrontEndServer};
 use rafters::key_value_store_client::KeyValueStoreClient;
 use rafters::{GetKey, IntegerArg, KeyValue, Reply};
 
 type ChildMap = HashMap<i32, (std::process::Child, KeyValueStoreClient<Channel>)>;
+
+const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("../proto/rafters_descriptor.pb");
 
 struct FrontendState {
     servers: ChildMap,
@@ -43,7 +45,7 @@ impl RaftersFrontend {
 }
 
 #[tonic::async_trait]
-impl Frontend for RaftersFrontend {
+impl FrontEnd for RaftersFrontend {
     async fn get(&self, request: Request<GetKey>) -> Result<Response<Reply>, Status> {
         // ask leader for info
         let mut state = self.state.lock().await;
@@ -129,10 +131,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frontend_state = Arc::new(Mutex::new(FrontendState::new()));
     let frontend = RaftersFrontend::new(frontend_state);
 
+    let reflection_service = tonic_reflection::server::Builder::configure().register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET).build()?;
+
     info!("Starting frontend. Listening on {}", addr);
 
     Server::builder()
-        .add_service(FrontendServer::new(frontend))
+        .add_service(reflection_service)
+        .add_service(FrontEndServer::new(frontend))
         .serve(addr)
         .await?;
 
