@@ -1,6 +1,7 @@
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::os::unix::process::CommandExt;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tonic::{
@@ -84,6 +85,7 @@ impl FrontEnd for RaftersFrontend {
         let children: Vec<std::process::Child> = (1..=num_servers)
             .map(|i| {
                 let child = std::process::Command::new(child_binary)
+                    .arg0(format!("raftserver{}", i))
                     .arg(i.to_string())
                     .arg(num_servers.to_string())
                     .spawn()
