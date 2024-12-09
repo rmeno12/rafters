@@ -14,8 +14,6 @@ service KeyValueStore {
     rpc Put(KeyValue) returns (Reply){};
     rpc Replace(KeyValue) returns (Reply){};
 
-    rpc AddServer (IntegerArg) returns (Empty);
-    rpc RemoveServer (IntegerArg) returns (Empty);
     rpc RequestVote (VoteRequest) returns (VoteResponse);
     rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
 }

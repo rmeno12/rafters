@@ -1,2 +1,2 @@
 #!/bin/bash
-grpcurl -plaintext -proto proto/rafters.proto -d '{"arg": 4}' [::1]:8001 rafters.Frontend.StartRaft
+grpcurl -plaintext -proto ../../ut/distributed/CS380D-RaftProject/generatedfiles/server.proto -d '{"arg": 3}' 127.0.0.1:8001 raftkv.FrontEnd.StartRaft

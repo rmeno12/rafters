@@ -85,16 +85,18 @@ impl FrontEnd for RaftersFrontend {
             .map(|i| {
                 let child = std::process::Command::new(child_binary)
                     .arg(i.to_string())
+                    .arg(num_servers.to_string())
                     .spawn()
                     .unwrap_or_else(|_| panic!("Couldn't start raft node {}", i));
                 info!("Started child raft node {} (pid {})", i, child.id());
                 child
             })
             .collect();
+
         // wait for raft nodees to come online before sending them messages
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
         for (i, child) in (1..=num_servers).zip(children) {
-            let endpoint = Endpoint::from_shared(format!("http://[::1]:{}", 9000 + i)).unwrap();
+            let endpoint = Endpoint::from_shared(format!("http://127.0.0.1:{}", 9000 + i)).unwrap();
             info!("Connecting to node {} on {:?}", i, endpoint.uri());
             let client = KeyValueStoreClient::connect(endpoint)
                 .await
@@ -104,13 +106,7 @@ impl FrontEnd for RaftersFrontend {
                 });
             state.servers.insert(i, (child, client));
         }
-        for (num, (_, client)) in state.servers.iter_mut() {
-            for i in 1..=num_servers {
-                if i != *num {
-                    client.add_server(IntegerArg { arg: i }).await?;
-                }
-            }
-        }
+
         state.current_leader = 1; // Guess that node 1 is the leader
         Ok(Response::new(Reply {
             wrong_leader: false,
@@ -127,11 +123,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
 
-    let addr = "[::1]:8001".parse().unwrap();
+    let addr = "127.0.0.1:8001".parse().unwrap();
     let frontend_state = Arc::new(Mutex::new(FrontendState::new()));
     let frontend = RaftersFrontend::new(frontend_state);
 
-    let reflection_service = tonic_reflection::server::Builder::configure().register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET).build()?;
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .build()?;
 
     info!("Starting frontend. Listening on {}", addr);
 

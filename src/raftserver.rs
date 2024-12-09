@@ -3,6 +3,8 @@ use rand::prelude::Distribution;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::{From, Into};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::process;
 use std::sync::Arc;
 use tokio::{
     sync::Mutex,
@@ -84,6 +86,7 @@ struct RaftNodeState {
 
     kv: HashMap<String, String>,
 
+    total_nodes: i64,
     other_nodes: HashMap<NodeId, KeyValueStoreClient<Channel>>,
     sent_len: HashMap<NodeId, usize>,
     acked_len: HashMap<NodeId, usize>,
@@ -101,8 +104,8 @@ impl Timeouts {
 // TODO: rethink all unwraps
 
 impl RaftNodeState {
-    fn new(id: NodeId, log_file_path: String) -> Self {
-        let election_timeout_dist = rand::distributions::Uniform::from(0.8..=1.2);
+    fn new(id: NodeId, total_nodes: i64, log_file_path: String) -> Self {
+        let election_timeout_dist = rand::distributions::Uniform::from(1.2..=1.6);
         let mut rng = rand::thread_rng();
         let election_timeout = election_timeout_dist.sample(&mut rng);
         let mut acked_len = HashMap::new();
@@ -119,6 +122,7 @@ impl RaftNodeState {
             log: vec![],
             committed_index: 0,
             kv: HashMap::new(),
+            total_nodes,
             other_nodes: HashMap::new(),
             sent_len: HashMap::new(),
             acked_len,
@@ -127,6 +131,49 @@ impl RaftNodeState {
         state.recover();
         state.persist();
         state
+    }
+
+    async fn connect_to(
+        &mut self,
+        other: NodeId,
+    ) -> Result<KeyValueStoreClient<Channel>, Box<dyn std::error::Error>> {
+        let server_addr = format!("127.0.0.1:{}", 9000 + other);
+
+        let src_port_base = self.id * self.total_nodes + 7000;
+        let src_port = (src_port_base + other) as u16;
+        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), src_port);
+        info!(
+            "{}: connecting to {} ({} -> {})",
+            self.id, other, server_addr, local_addr
+        );
+
+        let channel = Channel::from_shared("http://".to_string() + &server_addr.clone())?
+            .connect_with_connector(tower::service_fn(move |_| {
+                let server_addr = server_addr.clone();
+                let local_addr = local_addr;
+
+                async move {
+                    let tcp = tokio::net::TcpSocket::new_v4()?;
+                    tcp.bind(local_addr)?;
+                    let stream = tcp.connect(server_addr.parse().unwrap()).await?;
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                }
+            }))
+            .await?;
+
+        let client = KeyValueStoreClient::new(channel);
+        Ok(client)
+    }
+
+    async fn connect_to_others(&mut self) {
+        for other_server_id in 1..=self.total_nodes {
+            if other_server_id != self.id {
+                let client = self.connect_to(other_server_id).await.expect("sdf");
+                self.other_nodes.insert(other_server_id, client);
+                self.acked_len.insert(other_server_id, 0);
+                self.sent_len.insert(other_server_id, 0);
+            }
+        }
     }
 
     fn append_entries(
@@ -325,31 +372,6 @@ impl KeyValueStore for RaftersServer {
 
     async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
         self.put(request).await
-    }
-
-    async fn add_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
-        let server_num = request.into_inner().arg.into();
-        let endpoint =
-            Endpoint::from_shared(format!("http://[::1]:{}", 9000 + server_num)).unwrap();
-        let client = KeyValueStoreClient::connect(endpoint)
-            .await
-            .unwrap_or_else(|_| {
-                error!("Couldn't connect to new node {}", server_num);
-                panic!()
-            });
-        let mut state = self.node_state.lock().await;
-        state.other_nodes.insert(server_num, client);
-        state.acked_len.insert(server_num, 0);
-        state.sent_len.insert(server_num, 0);
-        Ok(Response::new(Empty {}))
-    }
-
-    // TODO: this may be removable?
-    async fn remove_server(&self, request: Request<IntegerArg>) -> Result<Response<Empty>, Status> {
-        let server_num = request.into_inner().arg;
-        let servers = &mut self.node_state.lock().await.other_nodes;
-        servers.remove(&server_num.into());
-        Ok(Response::new(Empty {}))
     }
 
     async fn request_vote(
@@ -649,8 +671,11 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                                 state.persist();
                             }
                         }
-                        _ => {
-                            warn!("{} Couldn't send VoteRequest to {}", id, client_id)
+                        err => {
+                            warn!(
+                                "{} Couldn't send VoteRequest to {}. Err: {:?}",
+                                id, client_id, err
+                            )
                         }
                     }
                 })
@@ -660,23 +685,43 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
     }
 }
 
+async fn server_startup(node_state: Arc<Mutex<RaftNodeState>>) {
+    // wait a second for all other nodes to startup
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // connect to all the other nodes
+    node_state.lock().await.connect_to_others().await;
+
+    tokio::spawn(leader_loop(node_state.clone()));
+    tokio::spawn(follower_candidate_loop(node_state.clone()));
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let node_num: i64 = args.get(1).unwrap().parse()?;
+
+    if args.len() != 3 {
+        eprintln!("Usage: {} <node_id> <total_nodes>", args[0]);
+        process::exit(1);
+    }
+
+    let node_num: NodeId = args[1].parse()?;
+    let total_nodes: i64 = args[2].parse()?;
 
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
 
-    let addr = format!("[::1]:{}", 9000 + node_num).parse().unwrap();
+    let addr = format!("127.0.0.1:{}", 9000 + node_num).parse().unwrap();
     info!("Starting raft node {}. Listening on {}", node_num, addr);
 
     let node_log_path = format!("raftlog_{}", node_num);
-    let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(node_num, node_log_path)));
+    let raft_node_state = Arc::new(Mutex::new(RaftNodeState::new(
+        node_num,
+        total_nodes,
+        node_log_path,
+    )));
     let raftserver = RaftersServer::new(raft_node_state.clone());
 
-    tokio::spawn(leader_loop(raft_node_state.clone()));
-    tokio::spawn(follower_candidate_loop(raft_node_state.clone()));
+    tokio::spawn(server_startup(raft_node_state.clone()));
 
     Server::builder()
         .add_service(KeyValueStoreServer::new(raftserver))
