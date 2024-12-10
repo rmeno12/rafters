@@ -96,7 +96,7 @@ impl FrontEnd for RaftersFrontend {
             .collect();
 
         // wait for raft nodees to come online before sending them messages
-        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         for (i, child) in (1..=num_servers).zip(children) {
             let endpoint = Endpoint::from_shared(format!("http://127.0.0.1:{}", 9000 + i)).unwrap();
             info!("Connecting to node {} on {:?}", i, endpoint.uri());

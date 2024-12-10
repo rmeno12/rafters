@@ -144,7 +144,7 @@ impl RaftNodeState {
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), src_port);
         info!(
             "{}: connecting to {} ({} -> {})",
-            self.id, other, server_addr, local_addr
+            self.id, other, local_addr, server_addr
         );
 
         let channel = Channel::from_shared("http://".to_string() + &server_addr.clone())?
@@ -154,6 +154,7 @@ impl RaftNodeState {
 
                 async move {
                     let tcp = tokio::net::TcpSocket::new_v4()?;
+                    tcp.set_reuseport(true)?; // hopefully this isn't a bad thing
                     tcp.bind(local_addr)?;
                     let stream = tcp.connect(server_addr.parse().unwrap()).await?;
                     Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
@@ -168,7 +169,16 @@ impl RaftNodeState {
     async fn connect_to_others(&mut self) {
         for other_server_id in 1..=self.total_nodes {
             if other_server_id != self.id {
-                let client = self.connect_to(other_server_id).await.expect("sdf");
+                let client = self
+                    .connect_to(other_server_id)
+                    .await
+                    .unwrap_or_else(|err| {
+                        error!(
+                            "{}: unable to connect to {}! Err: {:?}",
+                            self.id, other_server_id, err
+                        );
+                        panic!();
+                    });
                 self.other_nodes.insert(other_server_id, client);
                 self.acked_len.insert(other_server_id, 0);
                 self.sent_len.insert(other_server_id, 0);
