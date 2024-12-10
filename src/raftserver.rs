@@ -8,7 +8,7 @@ use std::process;
 use std::sync::Arc;
 use tokio::{
     sync::Mutex,
-    time::{timeout, Duration, Instant},
+    time::{Duration, Instant},
 };
 use tonic::{
     transport::{Channel, Endpoint, Server},
@@ -526,18 +526,19 @@ fn replicate_log_to(
                 Timeouts::LOG_REPLICATE
             };
             let to_ack_len = prefix_len + suffix.len();
-            let req = AppendEntriesRequest {
+            let mut req = Request::new(AppendEntriesRequest {
                 term: state.term,
                 leader_id: state.id,
                 prev_log_index: prefix_len as i32,
                 prev_log_term: prefix_term,
                 entries: suffix,
                 leader_commit_index: state.committed_index as i32,
-            };
+            });
+            req.set_timeout(timeout_time);
             let id = state.id;
             let req_result = client.append_entries(req);
-            let done = match timeout(timeout_time, req_result).await {
-                Ok(Ok(resp)) => {
+            let done = match req_result.await {
+                Ok(resp) => {
                     let resp = resp.into_inner();
                     let mut done = true;
                     if resp.term == state.term && state.kind == RaftNodeKind::Leader {
@@ -559,8 +560,11 @@ fn replicate_log_to(
                     }
                     done
                 }
-                _ => {
-                    warn!("{}: Unable to replicate log to {}", id, client_id);
+                Err(e) => {
+                    warn!(
+                        "{}: Unable to replicate log to {}. Err: {}",
+                        id, client_id, e
+                    );
                     true
                 }
             };
@@ -626,9 +630,11 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                 let mut client = client.clone();
                 let this_state = node_state.clone();
                 tokio::spawn(async move {
-                    let req_result = client.request_vote(vote_req);
-                    match timeout(Timeouts::VOTE_RESPONSE, req_result).await {
-                        Ok(Ok(resp)) => {
+                    let mut req = Request::new(vote_req);
+                    req.set_timeout(Timeouts::VOTE_RESPONSE);
+                    let req_result = client.request_vote(req);
+                    match req_result.await {
+                        Ok(resp) => {
                             let resp = resp.into_inner();
                             let mut state = this_state.lock().await;
                             if state.kind == RaftNodeKind::Candidate
@@ -660,10 +666,10 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                                 state.persist();
                             }
                         }
-                        err => {
+                        Err(e) => {
                             warn!(
-                                "{}: Couldn't send VoteRequest to {}. Err: {:?}",
-                                id, client_id, err
+                                "{}: Couldn't send VoteRequest to {}. Err: {}",
+                                id, client_id, e
                             )
                         }
                     }
