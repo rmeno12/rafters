@@ -139,7 +139,7 @@ impl RaftNodeState {
     ) -> Result<KeyValueStoreClient<Channel>, Box<dyn std::error::Error>> {
         let server_addr = format!("127.0.0.1:{}", 9000 + other);
 
-        let src_port_base = self.id * self.total_nodes + 7000;
+        let src_port_base = (self.id - 1) * self.total_nodes + 7000;
         let src_port = (src_port_base + other) as u16;
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), src_port);
         info!(
