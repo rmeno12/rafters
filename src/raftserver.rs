@@ -11,7 +11,7 @@ use tokio::{
     time::{Duration, Instant},
 };
 use tonic::{
-    transport::{Channel, Endpoint, Server},
+    transport::{Channel, Server},
     Request, Response, Status,
 };
 
@@ -22,7 +22,7 @@ pub mod rafters {
 use rafters::key_value_store_client::KeyValueStoreClient;
 use rafters::key_value_store_server::{KeyValueStore, KeyValueStoreServer};
 use rafters::{
-    AppendEntriesRequest, AppendEntriesResponse, Empty, GetKey, IntegerArg, KeyValue, Reply, State,
+    AppendEntriesRequest, AppendEntriesResponse, Empty, GetKey, KeyValue, Reply, State,
     VoteRequest, VoteResponse,
 };
 
@@ -395,7 +395,10 @@ impl KeyValueStore for RaftersServer {
     ) -> Result<Response<VoteResponse>, Status> {
         let mut state = self.node_state.lock().await;
         let req = request.into_inner();
-        info!("{}: Got vote request from {}", state.id, req.candidate_id);
+        info!(
+            "{}: Got vote request from {} for term {}",
+            state.id, req.candidate_id, req.term
+        );
 
         // If we're behind, become a follower
         if req.term > state.term {
@@ -419,9 +422,12 @@ impl KeyValueStore for RaftersServer {
             && log_ok
             && (state.voted_for == req.candidate_id || state.voted_for == 0);
         if grant_vote {
+            trace!("{}: Granting vote for {}", state.id, req.candidate_id);
             state.voted_for = req.candidate_id;
             state.election_timeout_end = Instant::now() + get_election_timeout();
             state.persist();
+        } else {
+            trace!("{}: Denying vote for {}", state.id, req.candidate_id);
         }
         Ok(Response::new(VoteResponse {
             term: state.term,
@@ -452,7 +458,7 @@ impl KeyValueStore for RaftersServer {
         if req.term == state.term && log_ok {
             let entries: Vec<LogEntry> = req.entries.into_iter().map(Into::into).collect();
             if !entries.is_empty() {
-                info!("{}: Adding new entries", state.id);
+                info!("{}: Adding new entries from {}", state.id, req.leader_id);
             }
             state.append_entries(
                 req.prev_log_index as usize,
@@ -482,7 +488,7 @@ impl KeyValueStore for RaftersServer {
 
 async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
     loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let state = node_state.lock().await;
         if state.kind != RaftNodeKind::Leader {
             continue;
@@ -553,9 +559,19 @@ fn replicate_log_to(
                             state.acked_len.insert(client_id, to_ack_len);
                             state.commit();
                         } else if state.sent_len.get(&client_id).copied().unwrap_or_default() > 0 {
+                            trace!(
+                                "{}: Node {} was behind, trying one index back",
+                                state.id,
+                                client_id
+                            );
                             let l = state.sent_len.get(&client_id).copied().unwrap_or_default();
                             state.sent_len.insert(client_id, l - 1);
                             done = false;
+                        } else {
+                            warn!(
+                                "{}: Replication to {} rejected for unhandled reason",
+                                state.id, client_id
+                            );
                         }
                     }
                     done

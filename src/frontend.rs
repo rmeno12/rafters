@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
 use tonic::{
     transport::{Channel, Endpoint, Server},
     Request, Response, Status,
@@ -15,7 +14,7 @@ pub mod rafters {
 
 use rafters::front_end_server::{FrontEnd, FrontEndServer};
 use rafters::key_value_store_client::KeyValueStoreClient;
-use rafters::{Empty, GetKey, IntegerArg, KeyValue, Reply, State};
+use rafters::{Empty, GetKey, IntegerArg, KeyValue, Reply};
 
 type ChildMap = HashMap<i32, (std::process::Child, KeyValueStoreClient<Channel>)>;
 
@@ -175,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let reflection_service = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-        .build()?;
+        .build_v1()?;
 
     info!("Starting frontend. Listening on {}", addr);
 
