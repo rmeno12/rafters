@@ -235,8 +235,7 @@ impl RaftNodeState {
     }
 
     fn commit(&mut self) {
-        let quorum_size = (self.other_nodes.len() + 1 + 1 + 2) / 2; // +1 to include leader, +1 to
-                                                                    // be over half, +2 to round up
+        let quorum_size = (self.total_nodes as usize + 2) / 2; // +2 to round up
         let ready = (0..=self.log.len())
             .rev()
             .find(|i| self.acked_len.values().filter(|&acked| acked >= i).count() >= quorum_size)
@@ -653,7 +652,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                         }
                         err => {
                             warn!(
-                                "{} Couldn't send VoteRequest to {}. Err: {:?}",
+                                "{}: Couldn't send VoteRequest to {}. Err: {:?}",
                                 id, client_id, err
                             )
                         }
