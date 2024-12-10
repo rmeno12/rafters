@@ -1,7 +1,7 @@
 use log::{error, info, warn};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::os::unix::process::CommandExt;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tonic::{
@@ -56,22 +56,59 @@ impl FrontEnd for RaftersFrontend {
         }
         let (_, leader_client) = &state.servers[&leader_id];
         let mut leader_client = leader_client.clone();
-        let response = timeout(Duration::from_millis(250), leader_client.get(request)).await;
-        todo!()
+        let getkey = request.into_inner();
+        match leader_client.get(Request::new(getkey.clone())).await {
+            Ok(response) => {
+                let response = response.into_inner();
+                if response.wrong_leader {
+                    // only retrying once to avoid looping a lot and save on complexity
+                    let new_leader: i32 = response.value.parse().unwrap();
+                    state.current_leader = new_leader;
+                    state.servers[&new_leader]
+                        .1
+                        .clone()
+                        .get(Request::new(getkey))
+                        .await
+                } else {
+                    Ok(Response::new(response))
+                }
+            }
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn put(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
         // tell leader
         let mut state = self.state.lock().await;
-        if state.current_leader == 0 {
+        let leader_id = state.current_leader;
+        if leader_id == 0 {
             return Err(Status::unavailable("Raft cluster not started yet!"));
         }
-        todo!()
+        let (_, leader_client) = &state.servers[&leader_id];
+        let mut leader_client = leader_client.clone();
+        let getkey = request.into_inner();
+        match leader_client.put(Request::new(getkey.clone())).await {
+            Ok(response) => {
+                let response = response.into_inner();
+                if response.wrong_leader {
+                    // only retrying once to avoid looping a lot and save on complexity
+                    let new_leader: i32 = response.value.parse().unwrap();
+                    state.current_leader = new_leader;
+                    state.servers[&new_leader]
+                        .1
+                        .clone()
+                        .put(Request::new(getkey))
+                        .await
+                } else {
+                    Ok(Response::new(response))
+                }
+            }
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
-        // tell leader
-        todo!()
+        self.put(request).await
     }
 
     async fn start_raft(&self, request: Request<IntegerArg>) -> Result<Response<Reply>, Status> {
