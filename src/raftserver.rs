@@ -99,6 +99,11 @@ impl Timeouts {
     const HEARTBEAT: Duration = Duration::from_millis(100);
     const LOG_REPLICATE: Duration = Duration::from_millis(250);
     const VOTE_RESPONSE: Duration = Duration::from_millis(250);
+
+fn get_election_timeout() -> Duration {
+    let election_timeout_dist = rand::distributions::Uniform::from(0.5..=1.0);
+    let mut rng = rand::thread_rng();
+    Duration::from_secs_f64(election_timeout_dist.sample(&mut rng))
 }
 
 // TODO: rethink all unwraps
@@ -414,7 +419,7 @@ impl KeyValueStore for RaftersServer {
             && (state.voted_for == req.candidate_id || state.voted_for == 0);
         if grant_vote {
             state.voted_for = req.candidate_id;
-            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.election_timeout_end = Instant::now() + get_election_timeout();
             state.persist();
         }
         Ok(Response::new(VoteResponse {
@@ -432,13 +437,13 @@ impl KeyValueStore for RaftersServer {
         if req.term > state.term {
             state.term = req.term;
             state.voted_for = 0;
-            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.election_timeout_end = Instant::now() + get_election_timeout();
             state.persist();
         }
         if req.term == state.term {
             state.kind = RaftNodeKind::Follower;
             state.current_leader = req.leader_id;
-            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.election_timeout_end = Instant::now() + get_election_timeout();
         }
         let log_ok = state.log.len() as i32 >= req.prev_log_index
             && (req.prev_log_index == 0
@@ -579,7 +584,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         if election_timeout_end > Instant::now() {
             continue;
         } else if kind == RaftNodeKind::Leader {
-            state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+            state.election_timeout_end = Instant::now() + get_election_timeout();
             continue;
         }
 
@@ -660,7 +665,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                 })
             })
             .collect();
-        state.election_timeout_end = Instant::now() + Duration::from_secs(1);
+        state.election_timeout_end = Instant::now() + get_election_timeout();
     }
 }
 
