@@ -96,9 +96,10 @@ struct RaftNodeState {
 
 struct Timeouts;
 impl Timeouts {
-    const HEARTBEAT: Duration = Duration::from_millis(100);
-    const LOG_REPLICATE: Duration = Duration::from_millis(250);
-    const VOTE_RESPONSE: Duration = Duration::from_millis(250);
+    const HEARTBEAT: Duration = Duration::from_millis(10);
+    const LOG_REPLICATE: Duration = Duration::from_millis(25);
+    const VOTE_RESPONSE: Duration = Duration::from_millis(10);
+}
 
 fn get_election_timeout() -> Duration {
     let election_timeout_dist = rand::distributions::Uniform::from(0.5..=1.0);
@@ -519,7 +520,11 @@ fn replicate_log_to(
                     command: entry.command as i32,
                 })
                 .collect();
-            let timeout_time = if suffix.is_empty() {Timeouts::HEARTBEAT} else {Timeouts::LOG_REPLICATE};
+            let timeout_time = if suffix.is_empty() {
+                Timeouts::HEARTBEAT
+            } else {
+                Timeouts::LOG_REPLICATE
+            };
             let to_ack_len = prefix_len + suffix.len();
             let req = AppendEntriesRequest {
                 term: state.term,
