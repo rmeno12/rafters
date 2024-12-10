@@ -160,7 +160,9 @@ impl FrontEnd for RaftersFrontend {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env = env_logger::Env::default().default_filter_or("info");
-    env_logger::init_from_env(env);
+    env_logger::Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
 
     let addr = "127.0.0.1:8001".parse().unwrap();
     let frontend_state = Arc::new(Mutex::new(FrontendState::new()));

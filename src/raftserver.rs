@@ -687,7 +687,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_nodes: i64 = args[2].parse()?;
 
     let env = env_logger::Env::default().default_filter_or("info");
-    env_logger::init_from_env(env);
+    env_logger::Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
 
     let addr = format!("127.0.0.1:{}", 9000 + node_num).parse().unwrap();
     info!("Starting raft node {}. Listening on {}", node_num, addr);
