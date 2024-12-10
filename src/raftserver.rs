@@ -354,7 +354,7 @@ impl KeyValueStore for RaftersServer {
             let id = state.id;
             let len = state.log.len();
             state.acked_len.insert(id, len);
-            replicate_log(&state, self.node_state.clone()).await;
+            replicate_log(&state, self.node_state.clone());
             // TODO: figure out what other fields are needed?
             Ok(Response::new(Reply {
                 wrong_leader: false,
@@ -482,36 +482,11 @@ async fn leader_loop(node_state: Arc<Mutex<RaftNodeState>>) {
         if state.kind != RaftNodeKind::Leader {
             continue;
         }
-        replicate_log(&state, node_state.clone()).await;
-        continue;
-        let id = state.id;
-        let req = AppendEntriesRequest {
-            term: state.term,
-            leader_id: id,
-            prev_log_index: state.log.len() as i32,
-            prev_log_term: state.log.last().map(|entry| entry.term).unwrap_or(0),
-            entries: vec![],
-            leader_commit_index: state.committed_index as i32,
-        };
-        let _vec_resps: Vec<_> = state
-            .other_nodes
-            .clone()
-            .into_iter()
-            .map(|(client_id, client)| {
-                let mut client = client.clone();
-                let req_val = req.clone();
-                tokio::spawn(async move {
-                    let req_result = client.append_entries(req_val);
-                    if (timeout(Timeouts::HEARTBEAT, req_result).await).is_err() {
-                        warn!("{}: Unable to send heartbeat to {}", id, client_id);
-                    }
-                });
-            })
-            .collect();
+        replicate_log(&state, node_state.clone());
     }
 }
 
-async fn replicate_log_to(
+fn replicate_log_to(
     node_state: Arc<Mutex<RaftNodeState>>,
     client_id: NodeId,
     client: KeyValueStoreClient<Channel>,
@@ -540,6 +515,7 @@ async fn replicate_log_to(
                     command: entry.command as i32,
                 })
                 .collect();
+            let timeout_time = if suffix.is_empty() {Timeouts::HEARTBEAT} else {Timeouts::LOG_REPLICATE};
             let to_ack_len = prefix_len + suffix.len();
             let req = AppendEntriesRequest {
                 term: state.term,
@@ -551,7 +527,7 @@ async fn replicate_log_to(
             };
             let id = state.id;
             let req_result = client.append_entries(req);
-            let done = match timeout(Timeouts::LOG_REPLICATE, req_result).await {
+            let done = match timeout(timeout_time, req_result).await {
                 Ok(Ok(resp)) => {
                     let resp = resp.into_inner();
                     let mut done = true;
@@ -586,17 +562,11 @@ async fn replicate_log_to(
     })
 }
 
-async fn replicate_log(state: &RaftNodeState, node_state: Arc<Mutex<RaftNodeState>>) {
-    let tasks: Vec<_> = state
-        .other_nodes
-        .clone()
-        .into_iter()
-        .map(|(client_id, client)| {
-            trace!("{}: Replicating log to {}", state.id, client_id);
-            replicate_log_to(node_state.clone(), client_id, client)
-        })
-        .collect();
-    futures::future::join_all(tasks).await;
+fn replicate_log(state: &RaftNodeState, node_state: Arc<Mutex<RaftNodeState>>) {
+    for (client_id, client) in state.other_nodes.clone() {
+        trace!("{}: Queueing replication to {}", state.id, client_id);
+        replicate_log_to(node_state.clone(), client_id, client);
+    }
 }
 
 async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
@@ -669,7 +639,7 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                                         state.sent_len.insert(*client_id, log_len);
                                         state.acked_len.insert(*client_id, 0);
                                     }
-                                    replicate_log(&state, this_state.clone()).await;
+                                    replicate_log(&state, this_state.clone());
                                 }
                             } else if resp.term > state.term {
                                 // our term is behind, step out of the election and wait for
