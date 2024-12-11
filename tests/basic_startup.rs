@@ -2,9 +2,11 @@ mod common;
 
 use anyhow::Result;
 use common::TestCluster;
+use serial_test::serial;
 use tokio::time::Duration;
 
 #[tokio::test]
+#[serial]
 async fn test_cluster_startup() -> Result<()> {
     let mut cluster = TestCluster::new();
     let mut client = cluster.start_frontend().await?;

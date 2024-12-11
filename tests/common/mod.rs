@@ -3,6 +3,8 @@ pub mod rafters {
 }
 
 use anyhow::{Context, Result};
+use rand::{Rng, SeedableRng};
+use rand::rngs::SmallRng;
 use std::{
     collections::HashMap,
     process::{Child, Command},
@@ -12,8 +14,8 @@ use tokio::time::Duration;
 use tonic::transport::Channel;
 use tonic::Request;
 
-use rafters::front_end_client::FrontEndClient;
-use rafters::key_value_store_client::KeyValueStoreClient;
+use rafters::{key_value_store_client::KeyValueStoreClient, GetKey};
+use rafters::{front_end_client::FrontEndClient, KeyValue};
 use rafters::{Empty, IntegerArg};
 
 #[derive(Debug, Error)]
@@ -115,4 +117,37 @@ impl TestCluster {
             Ok(terms_to_leaders[&last_term][0])
         }
     }
+}
+
+pub async fn validate_series(
+    mut client: FrontEndClient<Channel>,
+    min_key: i64,
+    max_key: i64,
+    id: i64,
+) -> Result<()> {
+    for key in min_key..max_key {
+        let mut rng = SmallRng::from_entropy();
+        let value = rng.gen_range(0..=1000).to_string();
+
+        client
+            .put(KeyValue {
+                key: key.to_string(),
+                value: value.clone(),
+                client_id: id,
+                request_id: 0,
+            })
+            .await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let reply = client.get(GetKey {
+            key: key.to_string(),
+            client_id: id,
+            request_id: 0,
+        }).await?.into_inner();
+
+        assert!(!reply.wrong_leader);
+        assert_eq!(reply.value, value);
+    }
+
+    Ok(())
 }
