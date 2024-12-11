@@ -7,31 +7,19 @@ use std::{
     collections::HashMap,
     process::{Child, Command},
 };
+use thiserror::Error;
 use tonic::transport::Channel;
 
 use rafters::front_end_client::FrontEndClient;
 use rafters::key_value_store_client::KeyValueStoreClient;
 use rafters::Empty;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum RaftersTestingError {
+    #[error("no leader found in cluster")]
     NoLeader,
+    #[error("multiple leaders found in cluster in latest term")]
     MultipleLeaders,
-}
-
-impl std::error::Error for RaftersTestingError {}
-
-impl std::fmt::Display for RaftersTestingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            RaftersTestingError::NoLeader => {
-                write!(f, "No leader found in cluster")
-            }
-            RaftersTestingError::MultipleLeaders => {
-                write!(f, "Multiple leaders found in cluster for latest term")
-            }
-        }
-    }
 }
 
 pub struct ClusterGuard {
