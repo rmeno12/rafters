@@ -158,8 +158,6 @@ impl FrontEnd for RaftersFrontend {
         }))
     }
 }
-// TODO: track some data by periodically getting all node states to find which is the leader, maybe
-// once every 3-4 seconds?
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
