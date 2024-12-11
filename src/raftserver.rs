@@ -804,8 +804,8 @@ async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
                         }
                         Err(e) => {
                             warn!(
-                                "{}: Couldn't send VoteRequest to {}. Err: {}",
-                                id, client_id, e
+                                "{}: Couldn't send VoteRequest to {} for term {}. Err: {}",
+                                id, client_id, vote_req.term, e
                             )
                         }
                     }

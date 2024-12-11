@@ -95,13 +95,37 @@ impl FrontEnd for RaftersFrontend {
         // tell leader
         let mut state = self.state.lock().await;
         state.current_leader = state.find_leader().await;
-        let leader_id = state.current_leader;
+        let mut leader_id = state.current_leader;
         if leader_id == 0 {
-            return Err(Status::unavailable("Unable to find leader!"));
+            leader_id = 1; // just start at 1 and loop if we can't find the real leader
         }
-        let (_, leader_client) = &state.servers[&leader_id];
-        let mut leader_client = leader_client.clone();
-        leader_client.put(request).await
+
+        // go through all nodes twice if necessary
+        let max_iter = state.servers.len() as i32 * 2;
+        let mut iter = 0;
+        let getkey = request.into_inner();
+        while iter < max_iter {
+            let (_, leader_client) = &state.servers[&leader_id];
+            let mut leader_client = leader_client.clone();
+            let resp_result = leader_client.put(Request::new(getkey.clone())).await;
+            match resp_result {
+                Ok(response) => {
+                    let reply = response.into_inner();
+                    if !reply.wrong_leader {
+                        state.current_leader = leader_id;
+                        return Ok(Response::new(reply));
+                    }
+                }
+                Err(e) => return Err(Status::unavailable(e.message())),
+            }
+            iter += 1;
+            leader_id += 1;
+            if leader_id > state.servers.len() as i32 {
+                leader_id = 1;
+            }
+        }
+
+        Err(Status::unavailable("Unable to get responses from servers"))
     }
 
     async fn replace(&self, request: Request<KeyValue>) -> Result<Response<Reply>, Status> {
