@@ -359,13 +359,16 @@ impl KeyValueStore for RaftersServer {
             let id = state.id;
             let len = state.log.len();
             state.acked_len.insert(id, len);
-            replicate_log(&state, self.node_state.clone());
-            // TODO: figure out what other fields are needed?
-            Ok(Response::new(Reply {
-                wrong_leader: false,
-                error: String::from(""),
-                value: String::from(""),
-            }))
+            let quorum_ack = replicate_log_sync(&mut state).await;
+            if quorum_ack {
+                Ok(Response::new(Reply {
+                    wrong_leader: false,
+                    error: String::from(""),
+                    value: String::from(""),
+                }))
+            } else {
+                Err(Status::unavailable("Unable to get acks from quorum"))
+            }
         } else {
             let req = request.get_ref();
             info!(
@@ -573,6 +576,12 @@ fn replicate_log_to(
                                 state.id, client_id
                             );
                         }
+                    } else if resp.term > state.term {
+                        state.term = resp.term;
+                        state.kind = RaftNodeKind::Follower;
+                        state.voted_for = 0;
+                        state.election_timeout_end = Instant::now() + get_election_timeout();
+                        done = true;
                     }
                     done
                 }
@@ -596,6 +605,117 @@ fn replicate_log(state: &RaftNodeState, node_state: Arc<Mutex<RaftNodeState>>) {
         trace!("{}: Queueing replication to {}", state.id, client_id);
         replicate_log_to(node_state.clone(), client_id, client);
     }
+}
+
+async fn replicate_log_to_sync(
+    state: &mut RaftNodeState,
+    client_id: NodeId,
+    client: &mut KeyValueStoreClient<Channel>,
+) -> bool {
+    trace!("{}: Replicating log to {}", state.id, client_id);
+    let prefix_len = state.sent_len.get(&client_id).copied().unwrap_or_default();
+    let prefix_term = if prefix_len > 0 {
+        state.log.get(prefix_len - 1).unwrap().term
+    } else {
+        0
+    };
+    let suffix: Vec<_> = state
+        .log
+        .get(prefix_len..)
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| rafters::LogEntry {
+            term: entry.term,
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+            command: entry.command as i32,
+        })
+        .collect();
+    let timeout_time = if suffix.is_empty() {
+        Timeouts::HEARTBEAT
+    } else {
+        Timeouts::LOG_REPLICATE
+    };
+    let to_ack_len = prefix_len + suffix.len();
+    let mut req = Request::new(AppendEntriesRequest {
+        term: state.term,
+        leader_id: state.id,
+        prev_log_index: prefix_len as i32,
+        prev_log_term: prefix_term,
+        entries: suffix,
+        leader_commit_index: state.committed_index as i32,
+    });
+    req.set_timeout(timeout_time);
+    let id = state.id;
+    let req_result = client.append_entries(req);
+    match req_result.await {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            if resp.term == state.term && state.kind == RaftNodeKind::Leader {
+                if resp.success {
+                    trace!(
+                        "{}: Replicated to {}. Now acked {}",
+                        state.id,
+                        client_id,
+                        to_ack_len
+                    );
+                    state.sent_len.insert(client_id, to_ack_len);
+                    state.acked_len.insert(client_id, to_ack_len);
+                    state.commit();
+                    true
+                } else if state.sent_len.get(&client_id).copied().unwrap_or_default() > 0 {
+                    trace!(
+                        "{}: Node {} was behind, trying one index back",
+                        state.id,
+                        client_id
+                    );
+                    let l = state.sent_len.get(&client_id).copied().unwrap_or_default();
+                    state.sent_len.insert(client_id, l - 1);
+                    Box::pin(replicate_log_to_sync(state, client_id, &mut client.clone())).await
+                } else {
+                    warn!(
+                        "{}: Replication to {} rejected for unhandled reason",
+                        state.id, client_id
+                    );
+                    false
+                }
+            } else if resp.term > state.term {
+                trace!(
+                    "{}: found that {} has higher term so becoming follower",
+                    state.id,
+                    client_id
+                );
+                state.term = resp.term;
+                state.kind = RaftNodeKind::Follower;
+                state.voted_for = 0;
+                state.election_timeout_end = Instant::now() + get_election_timeout();
+                false
+            } else {
+                error!("{}: Unhandled case in replicate_log_to_sync!", state.id);
+                false
+            }
+        }
+        Err(e) => {
+            warn!(
+                "{}: Unable to replicate log to {}. Err: {}",
+                id, client_id, e
+            );
+            false
+        }
+    }
+}
+
+async fn replicate_log_sync(state: &mut RaftNodeState) -> bool {
+    let quorum_size = (state.total_nodes as usize + 2) / 2; // +2 to round up
+    let mut num_acked = 0;
+    for (client_id, mut client) in state.other_nodes.clone() {
+        trace!("{}: Synchronously replicating to {}", state.id, client_id);
+        let acked = replicate_log_to_sync(state, client_id, &mut client).await;
+        if acked {
+            num_acked += 1;
+        }
+    }
+    num_acked >= quorum_size
 }
 
 async fn follower_candidate_loop(node_state: Arc<Mutex<RaftNodeState>>) {
