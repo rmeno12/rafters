@@ -1,8 +1,9 @@
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 use tonic::{
     transport::{Channel, Endpoint, Server},
     Request, Response, Status,
@@ -118,12 +119,15 @@ impl FrontEnd for RaftersFrontend {
                 }
                 Err(e) => return Err(Status::unavailable(e.message())),
             }
+            trace!("{} was not leader, will try next server", leader_id);
             iter += 1;
             leader_id += 1;
             if leader_id > state.servers.len() as i32 {
                 leader_id = 1;
             }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        warn!("tried all servers twice and got no positive responses or errors!");
 
         Err(Status::unavailable("Unable to get responses from servers"))
     }
