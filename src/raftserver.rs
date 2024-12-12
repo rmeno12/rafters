@@ -367,6 +367,7 @@ impl KeyValueStore for RaftersServer {
                     value: String::from(""),
                 }))
             } else {
+                warn!("{}: Unable to get quorum on put!", state.id);
                 Err(Status::unavailable("Unable to get acks from quorum"))
             }
         } else {
@@ -707,7 +708,7 @@ async fn replicate_log_to_sync(
 
 async fn replicate_log_sync(state: &mut RaftNodeState) -> bool {
     let quorum_size = (state.total_nodes as usize + 2) / 2; // +2 to round up
-    let mut num_acked = 0;
+    let mut num_acked = 1; // we already acked
     for (client_id, mut client) in state.other_nodes.clone() {
         trace!("{}: Synchronously replicating to {}", state.id, client_id);
         let acked = replicate_log_to_sync(state, client_id, &mut client).await;
