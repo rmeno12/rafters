@@ -307,7 +307,6 @@ impl KeyValueStore for RaftersServer {
         }))
     }
 
-    // TODO: figure out what to do with clientid and requestid
     async fn get(&self, request: Request<GetKey>) -> Result<Response<Reply>, Status> {
         let state = self.node_state.lock().await;
         if state.kind == RaftNodeKind::Leader {

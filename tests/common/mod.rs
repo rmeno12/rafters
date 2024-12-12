@@ -3,8 +3,9 @@ pub mod rafters {
 }
 
 use anyhow::{Context, Result};
-use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     process::{Child, Command},
@@ -14,8 +15,8 @@ use tokio::time::Duration;
 use tonic::transport::Channel;
 use tonic::Request;
 
-use rafters::{key_value_store_client::KeyValueStoreClient, GetKey};
 use rafters::{front_end_client::FrontEndClient, KeyValue};
+use rafters::{key_value_store_client::KeyValueStoreClient, GetKey};
 use rafters::{Empty, IntegerArg};
 
 #[derive(Debug, Error)]
@@ -29,6 +30,7 @@ enum RaftersTestingError {
 pub struct TestCluster {
     num_servers: i32,
     frontend: Option<Child>,
+    blocked: HashSet<(i32, i32)>,
 }
 
 impl Drop for TestCluster {
@@ -40,6 +42,10 @@ impl Drop for TestCluster {
             if let Err(e) = child.kill() {
                 eprintln!("Unable to kill frontend: {}", e);
             }
+
+            for (s, d) in self.blocked.clone() {
+                self.unblock_conn(s, d);
+            }
         }
     }
 }
@@ -49,6 +55,7 @@ impl TestCluster {
         Self {
             num_servers: 0,
             frontend: None,
+            blocked: HashSet::new(),
         }
     }
 
@@ -117,6 +124,36 @@ impl TestCluster {
             Ok(terms_to_leaders[&last_term][0])
         }
     }
+
+    pub fn block_conn(&mut self, src_id: i32, dst_id: i32) {
+        let dst_port = dst_id + 9000;
+        let src_port = 7000 + (src_id - 1) * self.num_servers + dst_id;
+
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "sudo iptables -I INPUT -p tcp --dport {} --sport {} -i lo -j DROP",
+                dst_port, src_port
+            ))
+            .status()
+            .expect("Unable to block ports");
+        self.blocked.insert((src_id, dst_id));
+    }
+
+    pub fn unblock_conn(&mut self, src_id: i32, dst_id: i32) {
+        let dst_port = dst_id + 9000;
+        let src_port = 7000 + (src_id - 1) * self.num_servers + dst_id;
+
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "sudo iptables -D INPUT -p tcp --dport {} --sport {} -i lo -j DROP",
+                dst_port, src_port
+            ))
+            .status()
+            .expect("Unable to block ports");
+        self.blocked.remove(&(src_id, dst_id));
+    }
 }
 
 pub async fn validate_series(
@@ -139,11 +176,14 @@ pub async fn validate_series(
             .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let reply = client.get(GetKey {
-            key: key.to_string(),
-            client_id: id,
-            request_id: 0,
-        }).await?.into_inner();
+        let reply = client
+            .get(GetKey {
+                key: key.to_string(),
+                client_id: id,
+                request_id: 0,
+            })
+            .await?
+            .into_inner();
 
         assert!(!reply.wrong_leader);
         assert_eq!(reply.value, value);
